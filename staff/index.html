@@ -651,9 +651,11 @@ var Engine = (function () {
       var s = toSen(p.amount); income += s; ensure(p.received_by).collected += s;
     });
     (a.otherIncome || []).forEach(function (p) {
+      if (isTrue(p.void)) return; // R67: deleted income / expenses are listed, never counted
       var s = toSen(p.amount); income += s; ensure(p.received_by).collected += s;
     });
     (a.expenses || []).forEach(function (p) {
+      if (isTrue(p.void)) return;
       var s = toSen(p.amount); expenses += s; ensure(p.paid_by).paidOut += s;
     });
     return {
@@ -830,7 +832,10 @@ if (typeof module !== 'undefined') module.exports = Engine;
  *        args: an array, or function (requestId) -> array (so the id can go in a request object or last position).
  *              Never include the session: the store puts it first when sending.
  *        opts: {requestId?, label?, meta? (saved with the entry), optimistic? fn(store, requestId) run at once,
- *               persist? (default true; false = memory only, e.g. registration forms with personal data)}
+ *               persist? (default true; false = memory only, e.g. registration forms with personal data),
+ *               patches? [{coll, id, row}] (R67: optimistic edits of EXISTING rows, row null = hide it; the previous rows are kept
+ *               with the entry and put back when the server refuses the change or the change is discarded)}
+ *        R67: an answer of a *_change endpoint carrying {payments, attendance, members} (sync-shaped rows) is merged at once.
  *        Sends in order, one at a time. A network failure keeps the entry and retries later WITH THE SAME requestId
  *        (5 s, 15 s, 30 s, 60 s …, on 'online' and on every sync). A returned result (ok or {error}) ends the entry.
  *   st.handle(endpoint, fn(result, entry, store))  -> register what to do with a server answer (also after a reload)
@@ -1003,6 +1008,8 @@ if (typeof module !== 'undefined') module.exports = Engine;
           if (!at || at <= startedAt) delete data[c][id]; // answered before this sync (or before a reload): the real row is in
         });
       });
+      // R67: edits still waiting in the outbox stay visible over the (older) server rows
+      all().forEach(function (e) { (e.undo || []).forEach(function (u) { if (!data[u.coll]) return; if (u.row) data[u.coll][u.id] = clone(u.row); else delete data[u.coll][u.id]; }); });
       data.since = p.now || data.since;
       data.syncedAt = Date.now();
     }
@@ -1034,6 +1041,11 @@ if (typeof module !== 'undefined') module.exports = Engine;
       var list = typeof args === 'function' ? args(rid) : (args || []);
       var entry = { id: rid, endpoint: endpoint, args: clone(list), label: opts.label || '', meta: clone(opts.meta || null), ts: Date.now(), tries: 0, persist: opts.persist !== false };
       if (opts.optimistic) { try { opts.optimistic(store, rid); } catch (e) { if (root.console) root.console.error(e); } }
+      if (opts.patches && opts.patches.length) { // R67: optimistic edit / delete of rows already on the phone
+        entry.undo = opts.patches.map(function (p) { var m = data[p.coll] || {}; return { coll: p.coll, id: p.id, prev: m[p.id] === undefined ? null : clone(m[p.id]), row: p.row ? clone(p.row) : null }; });
+        opts.patches.forEach(function (p) { if (!data[p.coll]) return; if (p.row) data[p.coll][p.id] = p.row; else delete data[p.coll][p.id]; });
+        changed({ patch: endpoint });
+      }
       if (entry.persist) { outbox.push(entry); saveOutbox(); } else memOnly.push(entry);
       emitStatus();
       flush();
@@ -1064,6 +1076,7 @@ if (typeof module !== 'undefined') module.exports = Engine;
             offline = false; tries = 0;
             answered[e.id] = Date.now();
             removeEntry(e.id);
+            if (refused(res)) revert(e); else mergeRows(res, e.endpoint);
             var h = handlers[e.endpoint];
             if (h) { try { h(res, e, store); } catch (err) { if (root.console) root.console.error(err); } }
             emit('result', { entry: e, result: res });
@@ -1083,6 +1096,19 @@ if (typeof module !== 'undefined') module.exports = Engine;
         next();
       }).then(function (s) { flushing = null; return s; });
       return flushing;
+    }
+
+    function refused(r) { return !!r && (r.ok === false || !!r.error); }
+    /** R67: put back the rows an optimistic patch replaced (the server said no, or the change was discarded). */
+    function revert(e) {
+      (e.undo || []).forEach(function (u) { if (!data[u.coll]) return; if (u.prev) data[u.coll][u.id] = u.prev; else delete data[u.coll][u.id]; });
+    }
+    /** R67: rows a change answer carries (same shape as sync) go into the copy at once. */
+    function mergeRows(r, endpoint) {
+      if (!r || !/_change$/.test(String(endpoint || ''))) return;
+      (r.members || []).forEach(function (x) { if (x && x.code) data.members[x.code] = x; });
+      (r.attendance || []).forEach(function (x) { if (x && x.att_id) data.attendance[x.att_id] = x; });
+      (r.payments || []).forEach(function (x) { if (x && x.pay_id) data.payments[x.pay_id] = x; });
     }
 
     function authLost() {
@@ -1132,7 +1158,14 @@ if (typeof module !== 'undefined') module.exports = Engine;
       pending: function () { return clone(all()); },
       isPending: isPending,
       /** Give up on one unsent change (the page asks first). Its optimistic rows go at the next sync. */
-      discard: function (id) { answered[id] = 1; return removeEntry(id).then(function () { emitStatus(); changed({ discard: id }); }); },
+      discard: function (id) {
+        answered[id] = 1;
+        all().forEach(function (e) { if (e.id === id) revert(e); });
+        ['attendance', 'payments'].forEach(function (c) { Object.keys(data[c]).forEach(function (k) { if (data[c][k] && data[c][k]._local === id) delete data[c][k]; }); });
+        return removeEntry(id).then(function () { emitStatus(); changed({ discard: id }); });
+      },
+      /** R67: merge the rows of a change answer that came back from a direct call (same as an outbox answer). */
+      putRows: function (r) { mergeRows(r, 'x_change'); changed({ rows: true }); },
       flush: flush,
       clear: clearAll,
       setSession: function (s, who) { session = s || ''; if (who) owner = who; emitStatus(); if (session && all().length) flush(); },
@@ -1163,6 +1196,74 @@ if (typeof module !== 'undefined') module.exports = Engine;
   root.FDAStore = { open: open, newRequestId: newRequestId, memoryBackend: memoryBackend, localBackend: localBackend, idbBackend: idbBackend, autoBackend: autoBackend,
     /** Session keys shared with the member page (Peggy / a partner scanning a member QR on their own phone, R51). */
     SESSION_KEYS: { staff: 'fda_staff', partners: 'fda_psession' } };
+})(typeof window !== 'undefined' ? window : globalThis);
+</script>
+
+<style>
+/* R67 edit / delete everything: the ⋯ button on every action row, struck-through deleted rows, "Edited" tags, the Undo toast. */
+.more{flex:0 0 auto;min-width:44px;min-height:44px;padding:0 10px;border-radius:12px;border:1px solid var(--line);background:var(--surface);color:var(--ink);font:700 20px/1 var(--body);letter-spacing:.05em;cursor:pointer}
+.more:focus-visible{outline:2px solid var(--pink);outline-offset:2px}
+.emenu{flex:1 1 100%;display:flex;flex-direction:column;gap:8px;background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:10px;margin:8px 0 0}
+.emenu .ebtns{display:flex;gap:8px;flex-wrap:wrap}
+.emenu .ebtns .btn{flex:1 1 120px;min-height:48px;padding:0 12px;font-size:15px}
+.emenu .btn.del{background:transparent;color:var(--pink);border:1px solid var(--pink)}
+.emenu .btn.sec{background:var(--surface-2);color:var(--ink);border:1px solid var(--line)}
+.emenu label{display:block;font-size:13px;color:var(--muted);margin:6px 0 4px}
+.emenu input,.emenu select,.emenu textarea{width:100%;box-sizing:border-box}
+.emenu .erow{display:grid;grid-template-columns:1fr 1fr;gap:8px}.emenu .erow>div{min-width:0}
+.emenu .eerr{color:var(--pink);font-size:14px;font-weight:600}
+.emenu .ehint{font-size:13px;color:var(--muted)}
+.voided b,.voided .vx{text-decoration:line-through}
+.voided{opacity:.62}
+.etag{display:inline-block;font-size:11px;font-weight:700;letter-spacing:.04em;border-radius:999px;padding:1px 8px;border:1px solid var(--muted);color:var(--muted);white-space:normal;margin-top:3px}
+.etag.del{border-color:var(--pink);color:var(--pink)}
+.utoast{position:fixed;left:12px;right:12px;bottom:16px;max-width:480px;margin:0 auto;display:flex;align-items:center;gap:12px;background:var(--surface);border:1px solid var(--green);color:var(--ink);border-radius:14px;padding:8px 8px 8px 16px;z-index:90;box-shadow:none}
+.utoast span{flex:1;font-weight:700;min-width:0}
+.utoast .btn{min-height:48px;padding:0 18px;background:var(--green);color:var(--dark)}
+.utoast.err{border-color:var(--pink)}
+</style>
+<script>
+/* FDAEdit (R67): helpers shared by Peggy's console and the partners console. Plain ES5. */
+(function (root) {
+  function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); }
+  /** "Deleted by Pheon · reason" (struck rows) / "Edited by Pheon" tag for a row, '' when untouched. */
+  function tag(o) {
+    o = o || {};
+    var by = o.edited_by || o.editedBy || '', why = o.void_reason || o.voidReason || '';
+    var gone = o.void === true || o.voided === true || o.result === 'VOID';
+    if (gone) return '<span class="etag del">Deleted' + (by ? ' by ' + esc(by) : '') + (why ? ' · ' + esc(why) : '') + '</span>';
+    if (by) return '<span class="etag">Edited · ' + esc(by) + '</span>';
+    return '';
+  }
+  function isGone(o) { return !!o && (o.void === true || o.voided === true || o.result === 'VOID'); }
+  var timer = null, el = null;
+  /** "Saved · Undo" for 10 s (R67). undo: function or null (then only the message). */
+  function undoToast(msg, undo, err) {
+    if (!root.document) return;
+    if (!el) { el = root.document.createElement('div'); el.setAttribute('role', 'status'); el.setAttribute('aria-live', 'polite'); root.document.body.appendChild(el); }
+    clearTimeout(timer);
+    el.className = 'utoast' + (err ? ' err' : '');
+    el.innerHTML = '<span>' + esc(msg) + '</span>' + (undo ? '<button type="button" class="btn">Undo</button>' : '');
+    el.style.display = 'flex';
+    var b = el.querySelector('button');
+    if (b) b.onclick = function () { hide(); try { undo(); } catch (e) { if (root.console) root.console.error(e); } };
+    timer = setTimeout(hide, undo ? 10000 : 3000);
+  }
+  function hide() { clearTimeout(timer); if (el) el.style.display = 'none'; }
+  /** The in-page "why?" box for a delete (never window.confirm). */
+  function reasonBox(id, label) {
+    return '<label for="' + id + '">' + esc(label || 'Why delete it? (shown on the list)') + '</label><input id="' + id + '" maxlength="200" autocomplete="off" placeholder="e.g. wrong member">';
+  }
+  /** a failed answer of any write (ok:false, {error}, ERROR / UNKNOWN kinds) */
+  function failed(r) { return !r || r.ok === false || !!r.error || r.kind === 'ERROR' || r.kind === 'UNKNOWN'; }
+  /** Monday of last week (KL) - the oldest day Peggy may change (R25 window; the server checks it too). */
+  function peggyFrom(today) {
+    var d = new Date(Date.UTC(+today.slice(0, 4), +today.slice(5, 7) - 1, +today.slice(8, 10)));
+    var wd = (d.getUTCDay() + 6) % 7;
+    d.setUTCDate(d.getUTCDate() - wd - 7);
+    return d.toISOString().slice(0, 10);
+  }
+  root.FDAEdit = { tag: tag, isGone: isGone, undoToast: undoToast, hideToast: hide, reasonBox: reasonBox, failed: failed, peggyFrom: peggyFrom, esc: esc };
 })(typeof window !== 'undefined' ? window : globalThis);
 </script>
 
@@ -1229,6 +1330,7 @@ function member(code){return members()[code]||null;}
 function att(){return st?st.list('attendance'):[];}
 function pays(){return st?st.list('payments'):[];}
 function rowsFor(key){return att().filter(function(r){return r.class_key===key&&r.result!=='VOID';}).sort(function(a,b){return String(a.ts)<String(b.ts)?-1:1;});}
+function voidRowsFor(key){return att().filter(function(r){return r.class_key===key&&r.result==='VOID';}).sort(function(a,b){return String(a.ts)<String(b.ts)?-1:1;});}
 function nameOf(r){if(!r.code)return r.guest_name||r._name||'Guest';var m=member(r.code);return m?m.name:r.code;}
 function memberPays(code,ym){return pays().filter(function(p){return p.code===code&&p.month===ym&&!p.void;});}
 function visits(code,ym){return att().filter(function(r){return r.code===code&&r.plan_month===ym&&['VOID','TRIAL','GUEST','IMPORTED'].indexOf(r.result)<0;}).length;}
@@ -1327,7 +1429,8 @@ function openSheet(){
   h+='<button class="btn block" id="shSync" style="margin-top:10px">Update now</button><button class="btn secondary block" id="shLogout" style="margin-top:10px">Log out</button><button class="btn secondary block" id="shClose" style="margin-top:10px">Close</button><div id="shAsk"></div></div>';
   var el=$('sheet'); el.innerHTML=h; el.classList.remove('hidden');
   el.onclick=function(e){ if(e.target===el) closeSheet(); var d=e.target.closest('[data-discard]');
-    if(d){ if(confirm('Discard this change? It will not be sent.')) st.discard(d.getAttribute('data-discard')).then(openSheet); } };
+    if(d){ var id=d.getAttribute('data-discard'); $('shAsk').innerHTML='<div class="ask" style="margin-top:12px"><p style="margin:0 0 10px">Discard this change? It will not be sent.</p><div class="actions"><button class="btn danger" id="shDisc">Discard</button><button class="btn secondary" id="shKeep">Keep</button></div></div>';
+      $('shDisc').onclick=function(){ st.discard(id).then(openSheet); }; $('shKeep').onclick=function(){ $('shAsk').innerHTML=''; }; } };
   $('shClose').onclick=closeSheet;
   $('shSync').onclick=function(){ st.flush(); st.sync().then(function(){toast('Up to date ✓');openSheet();},function(){toast('No signal right now.',true);}); };
   $('shLogout').onclick=function(){
@@ -1384,18 +1487,22 @@ function viewToday(){
   h+='<div class="actions" style="margin-top:12px"><button class="btn" id="goCi">Check in</button><button class="btn secondary" id="goGuest">Guest</button></div>';
   h+='<h3 class="sec-title">Who came</h3>';
   if(!rows.length)h+='<p class="empty">'+(s==='later'?'This class has not started.':'Nobody checked in yet.')+'</p>';
-  rows.forEach(function(r){
-    var m=r.code?member(r.code):null;
-    h+='<div class="person'+(r._local?' pending':'')+'"><div class="who"><b>'+esc(nameOf(r))+(m&&m.healthNote?'<span class="hn">Health note</span>':'')+'</b><small>'+esc(r.code||'Guest')+' · '+esc(tsTime(r.ts))+(r.via?' · '+esc(r.via):'')+'</small></div>'+pill(r.result,!!r._local)+
-       (r.result==='UNPAID'&&r.code?'<button class="btn good" data-collect="'+esc(r.code)+'">Collect</button>':'')+'</div>';
+  ITEMS={};
+  rows.concat(voidRowsFor(cls.class_key)).forEach(function(r){ /* R67: ⋯ on every row; deleted rows stay, struck through */
+    var m=r.code?member(r.code):null, it=attItem(r), key='a:'+r.att_id, gone=r.result==='VOID'; ITEMS[key]=it;
+    h+='<div class="person'+(r._local?' pending':'')+(gone?' voided':'')+'" style="flex-wrap:wrap"><div class="who"><b>'+esc(nameOf(r))+(m&&m.healthNote?'<span class="hn">Health note</span>':'')+'</b><small>'+esc(r.code||'Guest')+' · '+esc(tsTime(r.ts))+(r.via?' · '+esc(r.via):'')+'</small>'+FDAEdit.tag(r)+'</div>'+pill(gone?'VOID':r.result,!!r._local)+
+       (r.result==='UNPAID'&&r.code?'<button class="btn good" data-collect="'+esc(r.code)+'">Collect</button>':'')+(r._local?'':moreBtn(key))+menuHtml(key,it)+'</div>';
   });
   h+=moneyHtml();
+  var pt=pays().filter(function(p){return tsDate(p.ts)===today;});
+  h+='<h3 class="sec-title">Payments today</h3>'+(pt.length?payRowsHtml(pt,'p:'):'<p class="empty">No payments yet today.</p>');
   v.innerHTML=h;
   var sel=$('instr'); if(sel) sel.onchange=function(){ setInstructor(cls.class_key,sel.value); };
   $('goCi').onclick=function(){go('checkin');}; $('goGuest').onclick=function(){S.guest.cls=selClass;go('guest');};
-  v.onclick=function(e){var b=e.target.closest('[data-collect]');if(b)startPay(b.getAttribute('data-collect'));
-    var k=e.target.closest('[data-k]');if(k){selClass=k.getAttribute('data-k');viewToday();}};
-  var on=document.querySelector('#clsrow .selected'); if(on&&on.scrollIntoView)try{on.scrollIntoView({block:'nearest',inline:'center'});}catch(e){}
+  v.onclick=function(e){if(payEditClick(e)||onMenuClick(e))return;var b=e.target.closest('[data-collect]');if(b)startPay(b.getAttribute('data-collect'));
+    var k=e.target.closest('[data-k]');if(k){selClass=k.getAttribute('data-k');EM={key:'',mode:''};viewToday();}};
+  var on=document.querySelector('#clsrow .selected'), row=$('clsrow'); /* horizontal only: a repaint (menu, sync) never jumps the page */
+  if(on&&row)row.scrollLeft=Math.max(0,on.offsetLeft-(row.clientWidth-on.offsetWidth)/2);
 }
 function moneyHtml(){
   var d=money(Engine.dateStr(now())), m=money(ymNow());
@@ -1405,9 +1512,11 @@ function moneyHtml(){
 }
 function setInstructor(key,name){
   var list=st.get('sessions').map(function(x){return x.classKey===key?Object.assign({},x,{instructor:name}):x;});
-  st.write('door_setInstructor',function(rid){return [key,name,rid];},{label:'Instructor '+(name||'—')+' for '+shortLabel(sessionOf(key)),
+  var prev=(sessionOf(key)||{}).instructor||'';
+  var rid=st.write('door_setInstructor',function(rid){return [key,name,rid];},{label:'Instructor '+(name||'—')+' for '+shortLabel(sessionOf(key)),
     optimistic:function(s){s.put('sessions',null,list);}});
-  toast('Instructor saved');
+  saved(rid,'Instructor saved',function(){ var back=st.get('sessions').map(function(x){return x.classKey===key?Object.assign({},x,{instructor:prev}):x;}); st.put('sessions',null,back);
+    return {endpoint:'door_setInstructor',args:function(id){return [key,prev,id];}}; });
 }
 
 /* ================================================================ Check in (R52) */
@@ -1470,6 +1579,7 @@ function doCheckin(code){
     optimistic:function(s,id){ if(p.kind==='ALREADY'||p.kind==='NO_CLASS')return;
       s.put('attendance','L-'+id,{att_id:'L-'+id,_local:id,code:code,class_key:cls.class_key,plan_month:cls.counts_for,result:p.kind,via:'Manual',ts:Engine.isoKL(now())}); }});
   S.ci={rid:rid,code:code,prov:prov,server:null};
+  saved(rid,'Checked in '+m.name,function(res){return res.attId?{type:'checkin',action:'delete',id:res.attId,reason:'Undo'}:null;});
   S.recent.unshift({rid:rid,code:code,name:m.name,label:shortLabel(cls),kind:p.kind});
   paintCheckin(); window.scrollTo(0,0);
 }
@@ -1493,13 +1603,16 @@ function viewPay(){
   var v=$('view'),h='';
   if(S.saved)return viewSaved();
   if(!S.pay){
-    v.innerHTML='<h3 class="sec-title">Record a payment</h3><input id="pq" type="search" inputmode="search" autocomplete="off" placeholder="Name or code" value="'+esc(S.payQ)+'" aria-label="Search member"><div id="pout"></div>';
+    ITEMS={};
+    var recent=pays().filter(function(p){return inWindow(tsDate(p.ts));});
+    v.innerHTML='<h3 class="sec-title">Record a payment</h3><input id="pq" type="search" inputmode="search" autocomplete="off" placeholder="Name or code" value="'+esc(S.payQ)+'" aria-label="Search member"><div id="pout"></div>'+
+      '<h3 class="sec-title">Payments this week and last week</h3><p class="muted" style="margin:0 0 6px;font-size:14px">Tap ⋯ to fix or delete one.</p>'+(recent.length?payRowsHtml(recent,'r:'):'<p class="empty">None yet.</p>');
     var paint=function(){var q=S.payQ.trim(),r=search(q),o='';
       if(!q)o='<p class="empty">Type a name or code.</p>'; else if(!r.length)o='<p class="empty">No member found.</p>';
       r.forEach(function(m){o+='<div class="person"><div class="who"><b>'+esc(m.name)+'</b><small>'+esc(m.code)+' · '+esc(statusLine(m.code))+'</small></div><button class="btn" data-pick="'+esc(m.code)+'">Select</button></div>';});
       $('pout').innerHTML=o;};
     paint(); $('pq').oninput=function(){S.payQ=this.value;paint();};
-    v.onclick=function(e){var b=e.target.closest('[data-pick]');if(b)pickPay(b.getAttribute('data-pick'));};
+    v.onclick=function(e){if(payEditClick(e)||onMenuClick(e))return;var b=e.target.closest('[data-pick]');if(b)pickPay(b.getAttribute('data-pick'));};
     return;
   }
   var p=S.pay, m=member(p.code)||{name:p.code}, ym=ymNow(), py=prevYm(ym);
@@ -1549,6 +1662,7 @@ function savePay(){
   var rid=st.write('door_recordPayment',function(id){req.requestId=id;return [req];},{label:'Payment '+m.name+' '+rm(o.amount-reb),meta:{code:p.code},
     optimistic:function(s,id){s.put('payments','L-'+id,{pay_id:'L-'+id,_local:id,code:p.code,month:p.month,kind:o.kind,amount:Math.round((o.amount-reb)*100)/100,rebate:reb,method:p.method,received_by:p.by,void:false,ts:Engine.isoKL(now())});}});
   S.saved={rid:rid,name:m.name,code:p.code,amountLabel:rm(o.amount-reb),rebateLabel:reb>0?rm(reb):'',payId:'',error:'',newStatus:''};
+  saved(rid,'Payment saved',function(res){return res.payId?{type:'payment',action:'delete',id:res.payId,reason:'Undo'}:null;});
   S.receipt=null; viewPay();
 }
 function viewSaved(){
@@ -1617,10 +1731,10 @@ function viewGuest(){
     var name=g.name.trim(); if(!name){toast('Please type the guest\'s name',true);return;}
     var cls=sessionOf(g.cls); if(!cls){toast('No class to check the guest in to',true);return;}
     var req={name:name,method:g.method,receivedBy:g.by,classKey:cls.class_key};
-    st.write('door_guestDropIn',function(id){req.requestId=id;return [req];},{label:'Guest '+name+' · '+shortLabel(cls),
+    var grid=st.write('door_guestDropIn',function(id){req.requestId=id;return [req];},{label:'Guest '+name+' · '+shortLabel(cls),
       optimistic:function(s,id){ s.put('attendance','L-'+id,{att_id:'L-'+id,_local:id,_name:name,code:'',class_key:cls.class_key,plan_month:cls.counts_for,result:'GUEST',via:'Manual',ts:Engine.isoKL(now())});
         s.put('payments','L-'+id,{pay_id:'L-'+id,_local:id,code:'',month:cls.counts_for,kind:'DROPIN',amount:pricePer(),rebate:0,method:g.method,received_by:g.by,void:false,ts:Engine.isoKL(now())}); }});
-    toast('Guest checked in ✓ '+price); S.guest={name:'',method:g.method,by:g.by,cls:g.cls}; viewGuest();
+    saved(grid,'Guest checked in ✓ '+price,function(res){return res.attId||res.payId?{type:'guest',action:'delete',id:res.attId||res.payId,reason:'Undo'}:null;}); S.guest={name:'',method:g.method,by:g.by,cls:g.cls}; viewGuest();
   };
 }
 
@@ -1676,17 +1790,17 @@ function viewEdit(){ if(tab!=='edit')return; if(S.ed.cls)return viewEditClass();
   $('view').innerHTML=h;
   $('view').onclick=function(e){var b=e.target.closest('[data-cls]');if(b)openEditClass(b.getAttribute('data-cls'));};
 }
-function openEditClass(key){
-  $('view').innerHTML='<div class="skel"></div><div class="skel"></div>';
+function openEditClass(key,quiet){
+  if(!quiet)$('view').innerHTML='<div class="skel"></div><div class="skel"></div>';
   call('door_editClass',[key],function(r){
     if(!r||!r.ok){toast((r&&r.error)||'Could not open the class',true);viewEdit();return;}
-    S.ed.cls=r.cls;S.ed.confirm='';S.ed.moving='';S.ed.q='';window.scrollTo(0,0);viewEditClass();
+    S.ed.cls=r.cls;S.ed.confirm='';S.ed.moving='';if(!quiet){S.ed.q='';window.scrollTo(0,0);}viewEditClass();
   },function(){toast('No signal. Try again.',true);viewEdit();});
 }
 function edSend(op,okMsg,after){
   if(S.ed.busy)return; S.ed.busy=true;
   op.classKey=S.ed.cls.classKey;
-  st.write('door_edit',function(id){op.requestId=id;return [op];},{label:'Edit '+S.ed.cls.label,meta:{classKey:op.classKey,ok:okMsg}});
+  st.write('door_edit',function(id){op.requestId=id;return [op];},{label:'Edit '+S.ed.cls.label,meta:{classKey:op.classKey,ok:okMsg,op:op.op}});
   S.ed.after=after||null;
 }
 function viewEditClass(){
@@ -1699,17 +1813,10 @@ function viewEditClass(){
   if(S.ed.busy)h+='<div class="notice">Saving…'+(st.status().state==='offline'?' (no signal — it will send by itself)':'')+'</div>';
   h+='<h3 class="sec-title">Who came</h3>';
   if(!c.rows.length)h+='<p class="empty">Nobody is checked in to this class.</p>';
-  c.rows.forEach(function(r){
-    h+='<div class="person"><div class="who"><b>'+esc(r.name)+'</b><small>'+esc(r.code||'Guest')+' · '+esc(r.time)+(r.via==='Manual'&&r.note?' · '+esc(r.note):'')+'</small></div>'+pill(r.result)+'</div>';
-    if(r.result==='VOID')return;
-    if(S.ed.confirm===r.attId){
-      h+='<div class="ask"><p style="margin:0 0 10px">Remove <b>'+esc(r.name)+'</b> from this class? They stay on record as removed.</p><div class="actions"><button type="button" class="btn danger" data-yes="'+esc(r.attId)+'">Yes, remove</button><button type="button" class="btn secondary" data-no="1">Keep</button></div></div>';
-    } else if(S.ed.moving===r.attId){
-      var others=(S.ed.list||[]).filter(function(x){return x.classKey!==c.classKey;});
-      h+='<div class="ask"><label for="edTo" class="label" style="margin-top:0">Move '+esc(r.name)+' to</label><select id="edTo">'+others.map(function(x){return '<option value="'+esc(x.classKey)+'">'+esc(x.label)+'</option>';}).join('')+'</select><div class="actions" style="margin-top:10px"><button type="button" class="btn" data-go="'+esc(r.attId)+'">Move here</button><button type="button" class="btn secondary" data-no="1">Cancel</button></div></div>';
-    } else {
-      h+='<div class="actions"><button type="button" class="btn secondary" data-mv="'+esc(r.attId)+'">Move</button><button type="button" class="btn secondary" data-rm="'+esc(r.attId)+'">Remove</button></div>';
-    }
+  ITEMS={};
+  c.rows.forEach(function(r){ /* R67: ⋯ menu (move / delete with a reason / restore); deleted rows stay, struck through */
+    var it=srvItem(r,c.classKey), key='e:'+r.attId, gone=r.result==='VOID'; ITEMS[key]=it;
+    h+='<div class="person'+(gone?' voided':'')+'" style="flex-wrap:wrap"><div class="who"><b>'+esc(r.name)+'</b><small>'+esc(r.code||'Guest')+' · '+esc(r.time)+(r.via==='Manual'&&r.note?' · '+esc(r.note):'')+'</small>'+FDAEdit.tag(r)+'</div>'+pill(r.result)+moreBtn(key)+menuHtml(key,it)+'</div>';
   });
   h+='<h3 class="sec-title">Add a member</h3><input id="edQ" type="search" inputmode="search" autocomplete="off" placeholder="Name or code" value="'+esc(S.ed.q)+'" aria-label="Search member"><div id="edOut"></div>';
   $('view').innerHTML=h;
@@ -1719,13 +1826,9 @@ function viewEditClass(){
   $('edBack').onclick=function(){S.ed.cls=null;S.ed.confirm='';S.ed.moving='';loadEdit();};
   $('edSave').onclick=function(){ edSend({op:'classDetails',instructor:$('edInstr').value,notes:$('edNotes').value},'Class saved ✓'); viewEditClass(); };
   $('view').onclick=function(e){
+    if(onMenuClick(e))return;
     var t=e.target.closest('button'); if(!t||S.ed.busy&&!t.hasAttribute('data-no'))return;
-    if(t.hasAttribute('data-rm')){S.ed.confirm=t.getAttribute('data-rm');S.ed.moving='';viewEditClass();}
-    else if(t.hasAttribute('data-mv')){S.ed.moving=t.getAttribute('data-mv');S.ed.confirm='';viewEditClass();}
-    else if(t.hasAttribute('data-no')){S.ed.confirm='';S.ed.moving='';viewEditClass();}
-    else if(t.hasAttribute('data-yes')){edSend({op:'remove',attId:t.getAttribute('data-yes')},'Removed ✓');viewEditClass();}
-    else if(t.hasAttribute('data-go')){var to=$('edTo');if(!to||!to.value){toast('Pick a class',true);return;}edSend({op:'move',attId:t.getAttribute('data-go'),toClassKey:to.value},'Moved ✓');viewEditClass();}
-    else if(t.hasAttribute('data-add')){edSend({op:'add',code:t.getAttribute('data-add')},'Added ✓',function(){S.ed.q='';});viewEditClass();}
+    if(t.hasAttribute('data-add')){edSend({op:'add',code:t.getAttribute('data-add')},'Added ✓',function(){S.ed.q='';});viewEditClass();}
   };
 }
 
@@ -1736,23 +1839,191 @@ function viewHistory(){
     function(){ if(tab==='history')paintHistory(st.meta('history'),false,'No signal — showing what was saved on this phone.'); });
 }
 function paintHistory(hs,loading,note){
-  var h='<h3 class="sec-title">History</h3><p class="muted">Last 8 weeks. Read only — use Edit for this week and last week.</p>';
+  var h='<h3 class="sec-title">History</h3><p class="muted">Last 8 weeks. This week and last week: tap ⋯ to fix a check-in.</p>';
   if(note)h+='<div class="notice">'+esc(note)+'</div>';
   if(loading){ $('view').innerHTML=h+'<div class="skel"></div><div class="skel"></div><div class="skel"></div>'; return; }
   if(!hs||!(hs.classes||[]).length){ $('view').innerHTML=h+'<p class="empty">No classes yet.</p>'; return; }
+  ITEMS={};
   hs.classes.forEach(function(c){
     var open=S.hist.open===c.classKey, cn=c.counts||{};
     h+='<button type="button" class="cls" data-h="'+esc(c.classKey)+'" aria-expanded="'+open+'"><span>'+esc(c.label)+'<small>'+people(c.pax)+(c.instructor?' · '+esc(c.instructor):'')+' · '+rm(c.collected)+'</small>'+
        '<span class="counts">'+['PAID','TRIAL','UNPAID','GUEST','IMPORTED'].filter(function(k){return cn[k];}).map(function(k){return '<span class="pill '+PILL[k][0]+'">'+cn[k]+' '+esc(PILL[k][1])+'</span>';}).join('')+'</span></span><span class="go" aria-hidden="true">'+(open?'⌄':'›')+'</span></button>';
     if(open){ if(!(c.rows||[]).length)h+='<p class="empty">Nobody.</p>';
-      (c.rows||[]).forEach(function(r){h+='<div class="person"><div class="who"><b>'+esc(r.name||'Guest')+'</b><small>'+esc(r.code||'Guest')+' · '+esc(r.time)+(r.via?' · '+esc(r.via):'')+(r.note?' · '+esc(r.note):'')+'</small></div>'+pill(r.result)+'</div>';}); }
+      (c.rows||[]).forEach(function(r){ var it=srvItem(r,c.classKey), key='h:'+r.attId, gone=r.result==='VOID', can=inWindow(c.date||String(c.classKey).slice(0,10)); ITEMS[key]=it;
+        h+='<div class="person'+(gone?' voided':'')+'" style="flex-wrap:wrap"><div class="who"><b>'+esc(r.name||'Guest')+'</b><small>'+esc(r.code||'Guest')+' · '+esc(r.time)+(r.via?' · '+esc(r.via):'')+(r.note?' · '+esc(r.note):'')+'</small>'+FDAEdit.tag(r)+'</div>'+pill(r.result)+(can?moreBtn(key)+menuHtml(key,it):'')+'</div>';}); }
   });
   $('view').innerHTML=h;
-  $('view').onclick=function(e){var b=e.target.closest('[data-h]');if(b){var k=b.getAttribute('data-h');S.hist.open=S.hist.open===k?'':k;paintHistory(st.meta('history'));}};
+  $('view').onclick=function(e){if(onMenuClick(e))return;var b=e.target.closest('[data-h]');if(b){var k=b.getAttribute('data-h');S.hist.open=S.hist.open===k?'':k;paintHistory(st.meta('history'));}};
 }
+
+/* ================================================================ R67: edit / delete / undo every action */
+/* RES: server answers by requestId (for Undo of something already sent). EM: the open ⋯ menu {key, mode}. */
+var RES={}, EM={key:'',mode:''};
+var KINDL={PER:'Per class',STD:'Standard',UNL:'Unlimited',TOPUP_STD:'Top-up to Standard',TOPUP_UNL:'Top-up to Unlimited',EXTRA:'Extra class',DROPIN:'Guest drop-in'};
+function peggyFrom(){ return FDAEdit.peggyFrom(Engine.dateStr(now())); }
+function inWindow(day){ return String(day||'')>=peggyFrom(); }
+/* "Saved · Undo" for 10 s after a write (rid = its outbox id; undoOf(res) -> change request that reverses it) */
+function saved(rid,msg,undoOf){ FDAEdit.undoToast(msg||'Saved',function(){ undoWrite(rid,undoOf); }); }
+function undoWrite(rid,undoOf){
+  if(st.isPending(rid)){ st.discard(rid).then(function(){ toast('Undone ✓'); refresh({}); if(tab==='pay')viewPay(); }); return; }
+  var res=RES[rid];
+  if(!res){ toast('Still sending. Try Undo again in a moment.',true); return; }
+  if(FDAEdit.failed(res)){ toast('Nothing to undo (it was not saved).'); return; }
+  var req=undoOf(res); if(!req){ toast('Nothing to undo.'); return; }
+  if(req.endpoint){ st.write(req.endpoint,req.args,{label:'Undo'}); toast('Undone ✓'); return; }
+  change(req,{undo:true});
+}
+/* inverse of a change answer */
+function inverse(req,res){
+  if(req.action==='edit') return res.before?{type:req.type,action:'edit',id:req.id,patch:res.before}:null;
+  if(req.action==='delete') return {type:res.type||req.type,action:'restore',id:req.id};
+  return {type:res.type||req.type,action:'delete',id:req.id,reason:'Undo'};
+}
+/* every edit / delete / restore goes through the outbox (requestId) to door_change; patches = optimistic rows */
+function change(req,o){
+  o=o||{};
+  var label=(req.action==='delete'?'Delete ':req.action==='restore'?'Restore ':'Edit ')+(o.what||req.type);
+  var rid=st.write('door_change',function(id){req.requestId=id;return [req];},{label:label,patches:o.patches||null,meta:{type:req.type,action:req.action,id:req.id,undo:!!o.undo}});
+  EM={key:'',mode:''};
+  if(o.undo) toast('Undone ✓');
+  else saved(rid,req.action==='delete'?'Deleted':req.action==='restore'?'Restored':'Saved',function(res){ return inverse(req,res); });
+  refresh({}); if(tab==='pay')viewPay();
+  return rid;
+}
+function stamp(row,extra){ return Object.assign({},row,{edited_by:me,edited_at:Engine.isoKL(now())},extra||{}); }
+/* ---- the ⋯ menus. item = {kind:'att'|'pay', id, code, guest, result, classKey, name, row (local row or null), payId} */
+function moreBtn(key){ return '<button type="button" class="more" data-more="'+esc(key)+'" aria-label="Edit or delete" aria-expanded="'+(EM.key===key)+'">⋯</button>'; }
+function menuHtml(key,it){
+  if(EM.key!==key)return '';
+  var h='<div class="emenu" role="group" aria-label="Edit or delete">', gone=it.result==='VOID'||it.void;
+  if(it.kind==='att'&&!inWindow(String(it.classKey).slice(0,10))) return h+'<p class="ehint">Older than last week. Please ask a partner.</p></div>';
+  if(it.kind==='pay'&&!inWindow(tsDate(it.row&&it.row.ts))) return h+'<p class="ehint">Older than last week. Please ask a partner.</p></div>';
+  if(gone){ return h+'<p class="ehint">'+FDAEdit.tag(it.row||it)+'</p><div class="ebtns"><button type="button" class="btn" data-eact="restore">Restore</button><button type="button" class="btn sec" data-eact="close">Close</button></div></div>'; }
+  if(EM.mode==='delete'){
+    return h+FDAEdit.reasonBox('eWhy')+'<div class="eerr" id="eErr"></div><div class="ebtns"><button type="button" class="btn del" data-eact="delGo">Delete'+(it.guest?' guest + RM payment':'')+'</button><button type="button" class="btn sec" data-eact="close">Keep</button></div></div>';
+  }
+  if(EM.mode==='move'){
+    var others=pickable().filter(function(x){return x.class_key!==it.classKey;}).concat((S.ed.list||[]).filter(function(x){return x.classKey!==it.classKey;}).map(function(x){return {class_key:x.classKey,label:x.label};}));
+    var seen={},opts='';others.forEach(function(x){if(seen[x.class_key])return;seen[x.class_key]=1;opts+='<option value="'+esc(x.class_key)+'">'+esc(x.label||shortLabel(x))+'</option>';});
+    return h+'<label for="eTo">Move '+esc(it.name)+' to</label><select id="eTo">'+(opts||'<option value="">No other class this week</option>')+'</select><div class="ebtns"><button type="button" class="btn" data-eact="moveGo">Move</button><button type="button" class="btn sec" data-eact="close">Cancel</button></div></div>';
+  }
+  if(EM.mode==='editGuest'){
+    var p=it.payRow||{};
+    return h+'<label for="eGn">Guest name</label><input id="eGn" maxlength="60" value="'+esc(it.name)+'"><div class="erow"><div><label for="eGa">Amount RM</label><input id="eGa" inputmode="decimal" value="'+esc(p.amount!=null?p.amount:pricePer())+'"></div><div><label for="eGm">Method</label><select id="eGm">'+methods().map(function(m){return '<option'+(m===p.method?' selected':'')+'>'+esc(m)+'</option>';}).join('')+'</select></div></div>'+
+      '<label for="eGb">Received by</label><select id="eGb">'+holderOpts(p.received_by||me)+'</select><div class="eerr" id="eErr"></div><div class="ebtns"><button type="button" class="btn" data-eact="guestGo">Save</button><button type="button" class="btn sec" data-eact="close">Cancel</button></div></div>';
+  }
+  if(EM.mode==='editPay') return h+payEditForm(it)+'</div>';
+  h+='<div class="ebtns">';
+  if(it.kind==='att'&&!it.guest)h+='<button type="button" class="btn sec" data-eact="move">Move to another class</button>';
+  if(it.guest)h+='<button type="button" class="btn sec" data-eact="editGuest">Edit guest</button>';
+  if(it.kind==='pay'&&!it.guest)h+='<button type="button" class="btn sec" data-eact="editPay">Edit payment</button>';
+  h+='<button type="button" class="btn del" data-eact="delete">Delete</button><button type="button" class="btn sec" data-eact="close">Close</button></div></div>';
+  return h;
+}
+/* a guest check-in's RM payment on this phone (linked pay_id, else same name + day) */
+function guestPay(a){ var l=pays(),hit=null; l.forEach(function(p){ if(a.pay_id&&p.pay_id===a.pay_id)hit=p; });
+  if(!hit)l.forEach(function(p){ if(!hit&&!p.code&&p.kind==='DROPIN'&&String(p.guest_name||'').toLowerCase()===String(a.guest_name||a.name||'').toLowerCase()&&tsDate(p.ts)===String(a.class_key||a.classKey).slice(0,10))hit=p; }); return hit; }
+function guestAtt(p){ var hit=null; att().forEach(function(a){ if(!hit&&!a.code&&(a.pay_id===p.pay_id||(String(a.guest_name||'').toLowerCase()===String(p.guest_name||'').toLowerCase()&&String(a.class_key).slice(0,10)===tsDate(p.ts))))hit=a; }); return hit; }
+/* item from a local attendance row / payment row / server list row */
+function attItem(r){ var g=!r.code||r.result==='GUEST'||r.prev_result==='GUEST'; var it={kind:'att',id:r.att_id,code:r.code,guest:g,result:r.result,classKey:r.class_key,name:nameOf(r),row:r};
+  if(g)it.payRow=guestPay(r); return it; }
+function payItem(p){ var g=!p.code; return {kind:'pay',id:p.pay_id,code:p.code,guest:g,void:!!p.void,result:p.void?'VOID':'',name:g?(p.guest_name||'Guest'):nameOf({code:p.code}),row:p,payRow:p,classKey:''}; }
+function srvItem(r,classKey){ var loc=st.get('attendance')[r.attId]; var it={kind:'att',id:r.attId,code:r.code,guest:!!r.guest||!r.code,result:r.result,classKey:classKey,name:r.name,row:{edited_by:r.editedBy,void_reason:r.voidReason,result:r.result},srv:true};
+  if(it.guest)it.payRow=guestPay(loc||{guest_name:r.name,class_key:classKey}); return it; }
+/* one handler for every ⋯ / menu button inside #view (items: key -> item, filled by the painter) */
+var ITEMS={};
+function onMenuClick(e){
+  var m=e.target.closest('[data-more]');
+  if(m){ var k=m.getAttribute('data-more'); EM=EM.key===k?{key:'',mode:''}:{key:k,mode:''}; repaint(); showMenu(); return true; }
+  var b=e.target.closest('[data-eact]'); if(!b)return false;
+  var a=b.getAttribute('data-eact'), it=ITEMS[EM.key]; if(!it){EM={key:'',mode:''};repaint();return true;}
+  if(a==='close'){EM={key:'',mode:''};repaint();return true;}
+  if(a==='delete'||a==='move'||a==='editGuest'||a==='editPay'){ EM.mode=a; if(a==='editPay')PE=null; repaint(); showMenu(); var f=$('eWhy')||$('eGn'); if(f)try{f.focus({preventScroll:true});}catch(x){} return true; }
+  var type=it.guest?'guest':it.kind==='att'?'checkin':'payment', err=function(t){var x=$('eErr');if(x)x.textContent=t;else toast(t,true);};
+  if(a==='delGo'){ var why=String(($('eWhy')||{}).value||'').trim(); if(!why)return err('Please type why.'),true;
+    change({type:type,action:'delete',id:it.id,reason:why},{what:it.guest?'guest':it.kind==='att'?'check-in':'payment',patches:delPatches(it,why)}); return true; }
+  if(a==='restore'){ change({type:type,action:'restore',id:it.id},{patches:restorePatches(it)}); return true; }
+  if(a==='moveGo'){ var to=($('eTo')||{}).value; if(!to)return err('Pick a class.'),true;
+    change({type:'checkin',action:'edit',id:it.id,patch:{classKey:to}},{what:'check-in',patches:it.row&&it.row.att_id?[{coll:'attendance',id:it.id,row:stamp(it.row,{class_key:to,plan_month:(sessionOf(to)||{}).counts_for||to.slice(0,7)})}]:null}); return true; }
+  if(a==='guestGo'){ var nm=$('eGn').value.trim(), amt=Number($('eGa').value); if(!nm)return err('Please type the name.'),true; if(!isFinite(amt)||amt<0)return err('Check the amount.'),true;
+    var patch={name:nm,amount:Math.round(amt*100)/100,method:$('eGm').value,receivedBy:$('eGb').value}, pt=[];
+    var ar=it.kind==='att'&&it.row&&it.row.att_id?it.row:(it.payRow?guestAtt(it.payRow):null); if(ar)pt.push({coll:'attendance',id:ar.att_id,row:stamp(ar,{guest_name:nm})});
+    if(it.payRow)pt.push({coll:'payments',id:it.payRow.pay_id,row:stamp(it.payRow,{guest_name:nm,amount:patch.amount,method:patch.method,received_by:patch.receivedBy})});
+    change({type:'guest',action:'edit',id:it.id,patch:patch},{what:'guest',patches:pt}); return true; }
+  if(a==='payGo'){ payEditSave(it,err); return true; }
+  return false;
+}
+function delPatches(it,why){
+  var pt=[];
+  if(it.kind==='att'&&it.row&&it.row.att_id)pt.push({coll:'attendance',id:it.id,row:stamp(it.row,{result:'VOID',prev_result:it.row.result,void_reason:why})});
+  var p=it.payRow; if(it.guest&&p)pt.push({coll:'payments',id:p.pay_id,row:stamp(p,{void:true,void_reason:why})});
+  if(it.kind==='pay'&&!it.guest)pt.push({coll:'payments',id:it.id,row:stamp(it.row,{void:true,void_reason:why})});
+  if(it.kind==='pay'&&it.guest){ var ga=guestAtt(it.row); if(ga)pt.push({coll:'attendance',id:ga.att_id,row:stamp(ga,{result:'VOID',prev_result:'GUEST',void_reason:why})}); }
+  return pt;
+}
+function restorePatches(it){
+  var pt=[];
+  if(it.kind==='att'&&it.row&&it.row.att_id)pt.push({coll:'attendance',id:it.id,row:stamp(it.row,{result:it.row.prev_result||(it.guest?'GUEST':'UNPAID'),void_reason:''})});
+  if(it.payRow&&it.payRow.void)pt.push({coll:'payments',id:it.payRow.pay_id,row:stamp(it.payRow,{void:false,void_reason:''})});
+  return pt;
+}
+/* ---- payment edit form (options computed on this phone from the member's earlier payments; the server re-checks) */
+var PE=null;
+function payEditForm(it){
+  var p=it.row; if(!PE||PE.id!==p.pay_id)PE={id:p.pay_id,month:p.month,kind:p.kind,method:p.method,by:p.received_by,rebate:Number(p.rebate)||0,reason:p.rebate_reason||''};
+  var m=member(p.code)||{}, ym=ymNow(), py=prevYm(ym), months=[ym,py]; if(months.indexOf(PE.month)<0)months.unshift(PE.month);
+  var before=pays().filter(function(x){return x.pay_id!==p.pay_id&&x.code===p.code&&x.month===PE.month&&!x.void&&(String(x.ts)+'|'+x.pay_id)<(String(p.ts)+'|'+p.pay_id);});
+  var opts=Engine.paymentOptions({code:p.code,bday_month:m.bday_month},PE.month,before,ES());
+  var h='<label>For month</label><div class="seg">'+months.map(function(x){return '<button type="button" data-pm="'+x+'" class="'+(x===PE.month?'on':'')+'">'+esc(monthLabel(x))+'</button>';}).join('')+'</div>';
+  h+='<label>What was paid</label>'+(opts.length?opts.map(function(o){return '<button type="button" class="optcard'+(o.kind===PE.kind?' on':'')+'" data-pk="'+esc(o.kind)+'"><span>'+esc(o.label)+'</span><b>'+rm(o.amount)+'</b></button>';}).join(''):'<p class="ehint">Nothing more can be paid for this month.</p>');
+  h+='<div class="erow"><div><label for="ePm">Method</label><select id="ePm">'+methods().map(function(x){return '<option'+(x===PE.method?' selected':'')+'>'+esc(x)+'</option>';}).join('')+'</select></div><div><label for="ePb">Received by</label><select id="ePb">'+holderOpts(PE.by)+'</select></div></div>';
+  h+='<div class="erow"><div><label for="ePr">Rebate RM</label><input id="ePr" inputmode="decimal" value="'+esc(PE.rebate||'')+'"></div><div><label for="ePw">Rebate reason</label><input id="ePw" value="'+esc(PE.reason)+'"></div></div>';
+  if(p.receipt_no)h+='<p class="ehint">Receipt '+esc(p.receipt_no)+' will be voided. Make a new one after saving.</p>';
+  return h+'<div class="eerr" id="eErr"></div><div class="ebtns"><button type="button" class="btn" data-eact="payGo">Save changes</button><button type="button" class="btn sec" data-eact="close">Cancel</button></div>';
+}
+function payEditClick(e){
+  if(!PE)return false;
+  var b=e.target.closest('[data-pm]'); if(b){ PE.month=b.getAttribute('data-pm'); PE.kind=''; keepPE(); repaint(); return true; }
+  b=e.target.closest('[data-pk]'); if(b){ PE.kind=b.getAttribute('data-pk'); keepPE(); repaint(); return true; }
+  return false;
+}
+function keepPE(){ if($('ePm'))PE.method=$('ePm').value; if($('ePb'))PE.by=$('ePb').value; if($('ePr'))PE.rebate=$('ePr').value; if($('ePw'))PE.reason=$('ePw').value; }
+function payEditSave(it,err){
+  keepPE(); var p=it.row, m=member(p.code)||{};
+  var before=pays().filter(function(x){return x.pay_id!==p.pay_id&&x.code===p.code&&x.month===PE.month&&!x.void&&(String(x.ts)+'|'+x.pay_id)<(String(p.ts)+'|'+p.pay_id);});
+  var o=null; Engine.paymentOptions({code:p.code,bday_month:m.bday_month},PE.month,before,ES()).forEach(function(x){if(x.kind===PE.kind)o=x;});
+  if(!o)return err('Choose what was paid.');
+  var rb=String(PE.rebate||'').trim()===''?0:Number(PE.rebate); if(!isFinite(rb)||rb<0||rb>o.amount)return err('Rebate must be between RM0.00 and '+rm(o.amount)+'.');
+  if(rb>0&&!String(PE.reason).trim())return err('Please give a reason for the rebate.');
+  var patch={month:PE.month,kind:o.kind,amount:o.amount,rebate:rb,rebateReason:rb>0?String(PE.reason).trim():'',method:PE.method,receivedBy:PE.by};
+  change({type:'payment',action:'edit',id:p.pay_id,patch:patch},{what:'payment',patches:[{coll:'payments',id:p.pay_id,row:stamp(p,{month:PE.month,kind:o.kind,amount:Math.round((o.amount-rb)*100)/100,rebate:rb,method:PE.method,received_by:PE.by})}]});
+  PE=null;
+}
+/* the list of payments (Today: today; Pay: this week + last week) with ⋯ */
+function payRowsHtml(list,prefix){
+  var h='';
+  list.sort(function(a,b){return String(a.ts)<String(b.ts)?1:-1;}).forEach(function(p){
+    var it=payItem(p), key=prefix+p.pay_id; ITEMS[key]=it;
+    h+='<div class="person'+(p.void?' voided':'')+(p._local?' pending':'')+'" style="flex-wrap:wrap"><div class="who"><b>'+esc(it.name)+'</b><small class="vx">'+esc(KINDL[p.kind]||p.kind)+' · '+rm(p.amount)+(Number(p.rebate)>0?' (rebate '+rm(p.rebate)+')':'')+' · '+esc(p.method)+' · '+esc(p.received_by)+' · '+esc(tsTime(p.ts))+(tsDate(p.ts)!==Engine.dateStr(now())?' '+esc(Engine.fmtDate(tsDate(p.ts))):'')+'</small>'+FDAEdit.tag(p)+'</div>'+(p._local?'':moreBtn(key))+menuHtml(key,it)+'</div>';
+  });
+  return h;
+}
+/* the open menu fully on screen (it may open below the fold) */
+function showMenu(){ var el=document.querySelector('#view .emenu'); if(el&&el.scrollIntoView)try{el.scrollIntoView({block:'nearest',behavior:'smooth'});}catch(e){} }
+/* repaint whatever tab shows the open menu */
+function repaint(){ if(tab==='today')viewToday(); else if(tab==='pay')viewPay(); else if(tab==='edit')viewEditClass(); else if(tab==='history')paintHistory(st.meta('history')); }
 
 /* ================================================================ server answers (also for writes sent after a reload) */
 function registerHandlers(){
+  st.on('result',function(x){ RES[x.entry.id]=x.result; });
+  st.handle('door_change',function(res,e){
+    var undo=e.meta&&e.meta.undo;
+    if(FDAEdit.failed(res)){ FDAEdit.hideToast(); toast((undo?'Undo not done: ':'Not saved: ')+((res&&res.error)||''),true); }
+    else if(res.receiptVoided||res.warning) toast([res.receiptVoided?'Receipt '+res.receiptVoided+' voided. Make a new one if needed.':'',res.warning||''].join(' ').trim(),!!res.warning);
+    if(tab==='edit'&&S.ed.cls&&!S.ed.busy)openEditClass(S.ed.cls.classKey,true);
+    else if(tab==='history')viewHistory();
+    else repaint();
+  });
   st.handle('door_manualCheckIn',function(res,e,s){
     var row=s.get('attendance')['L-'+e.id];
     if(row){
@@ -1778,13 +2049,19 @@ function registerHandlers(){
   st.handle('door_guestDropIn',function(res,e,s){ if(!(res&&res.ok)){ s.remove('attendance','L-'+e.id); s.remove('payments','L-'+e.id); toast('Guest NOT saved: '+((res&&res.error)||''),true); } });
   st.handle('door_setInstructor',function(res){ if(!(res&&res.ok))toast((res&&res.error)||'Instructor not saved',true); });
   st.handle('door_registerAndCheckIn',function(res,e){
-    if(NM&&NM.rid===e.id){ if(res&&res.ok){NM.result=res.checkIn;NM.code=res.code;NM.duplicate=res.duplicate;toast('Member registered ✓');}
+    if(NM&&NM.rid===e.id){ if(res&&res.ok){NM.result=res.checkIn;NM.code=res.code;NM.duplicate=res.duplicate;
+        if(!res.duplicate)FDAEdit.undoToast('Member registered ✓',function(){ change({type:'member',action:'delete',id:res.code,reason:'Undo'},{undo:true}); NM=blankNM(); if(tab==='new')viewNew(); }); else toast('Already a member ✓');}
       else{NM.rid='';toast((res&&res.error)||'Not saved',true);} if(tab==='new'){viewNew(); if(!NM.result&&res&&res.error)$('nmErr').innerHTML='<div class="error">'+esc(res.error)+'</div>';} }
   });
   st.handle('door_edit',function(res,e){
     S.ed.busy=false;
     if(res&&res.ok){ if(res.classes)S.ed.list=res.classes; if(S.ed.cls&&res.cls&&res.cls.classKey===S.ed.cls.classKey)S.ed.cls=res.cls; S.ed.confirm='';S.ed.moving='';
-      toast((e.meta&&e.meta.ok)||'Saved ✓'); if(S.ed.after){S.ed.after();S.ed.after=null;} }
+      var op=e.meta&&e.meta.op, cls=S.ed.cls;
+      if(op==='add'&&res.attId)FDAEdit.undoToast((e.meta&&e.meta.ok)||'Saved ✓',function(){ change({type:'checkin',action:'delete',id:res.attId,reason:'Undo'},{undo:true}); });
+      else if(op==='classDetails'&&res.before&&cls)FDAEdit.undoToast((e.meta&&e.meta.ok)||'Saved ✓',function(){ var b={op:'classDetails',classKey:cls.classKey,instructor:res.before.instructor,notes:res.before.notes};
+        st.write('door_edit',function(id){b.requestId=id;return [b];},{label:'Undo class details',meta:{classKey:cls.classKey,ok:'Undone ✓',op:'undo'}}); });
+      else toast((e.meta&&e.meta.ok)||'Saved ✓');
+      if(S.ed.after){S.ed.after();S.ed.after=null;} }
     else toast((res&&res.error)||'Not saved',true);
     if(tab==='edit')viewEditClass();
   });

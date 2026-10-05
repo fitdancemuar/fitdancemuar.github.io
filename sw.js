@@ -3,7 +3,7 @@
    POSTs and other origins (script.google.com, script.googleusercontent.com, fonts, cdnjs) are not intercepted.
    Pages: stale-while-revalidate (open from the cache at once, fetch a fresh copy for next time). A new build has a new VERSION,
    so the new shell is installed and old caches are removed. */
-var VERSION = "77a2c3733381";
+var VERSION = "1b2845cd374c";
 var SHELL = ["./","./manifest.webmanifest","./staff/","./staff/manifest.webmanifest","./partners/","./partners/manifest.webmanifest","./icons/icon-32.png","./icons/icon-180.png","./icons/icon-192.png","./icons/icon-512.png","./icons/icon-512-maskable.png"];
 var CACHE = 'fda-shell-' + VERSION;
 

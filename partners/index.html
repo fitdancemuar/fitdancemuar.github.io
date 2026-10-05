@@ -699,9 +699,11 @@ var Engine = (function () {
       var s = toSen(p.amount); income += s; ensure(p.received_by).collected += s;
     });
     (a.otherIncome || []).forEach(function (p) {
+      if (isTrue(p.void)) return; // R67: deleted income / expenses are listed, never counted
       var s = toSen(p.amount); income += s; ensure(p.received_by).collected += s;
     });
     (a.expenses || []).forEach(function (p) {
+      if (isTrue(p.void)) return;
       var s = toSen(p.amount); expenses += s; ensure(p.paid_by).paidOut += s;
     });
     return {
@@ -878,7 +880,10 @@ if (typeof module !== 'undefined') module.exports = Engine;
  *        args: an array, or function (requestId) -> array (so the id can go in a request object or last position).
  *              Never include the session: the store puts it first when sending.
  *        opts: {requestId?, label?, meta? (saved with the entry), optimistic? fn(store, requestId) run at once,
- *               persist? (default true; false = memory only, e.g. registration forms with personal data)}
+ *               persist? (default true; false = memory only, e.g. registration forms with personal data),
+ *               patches? [{coll, id, row}] (R67: optimistic edits of EXISTING rows, row null = hide it; the previous rows are kept
+ *               with the entry and put back when the server refuses the change or the change is discarded)}
+ *        R67: an answer of a *_change endpoint carrying {payments, attendance, members} (sync-shaped rows) is merged at once.
  *        Sends in order, one at a time. A network failure keeps the entry and retries later WITH THE SAME requestId
  *        (5 s, 15 s, 30 s, 60 s …, on 'online' and on every sync). A returned result (ok or {error}) ends the entry.
  *   st.handle(endpoint, fn(result, entry, store))  -> register what to do with a server answer (also after a reload)
@@ -1051,6 +1056,8 @@ if (typeof module !== 'undefined') module.exports = Engine;
           if (!at || at <= startedAt) delete data[c][id]; // answered before this sync (or before a reload): the real row is in
         });
       });
+      // R67: edits still waiting in the outbox stay visible over the (older) server rows
+      all().forEach(function (e) { (e.undo || []).forEach(function (u) { if (!data[u.coll]) return; if (u.row) data[u.coll][u.id] = clone(u.row); else delete data[u.coll][u.id]; }); });
       data.since = p.now || data.since;
       data.syncedAt = Date.now();
     }
@@ -1082,6 +1089,11 @@ if (typeof module !== 'undefined') module.exports = Engine;
       var list = typeof args === 'function' ? args(rid) : (args || []);
       var entry = { id: rid, endpoint: endpoint, args: clone(list), label: opts.label || '', meta: clone(opts.meta || null), ts: Date.now(), tries: 0, persist: opts.persist !== false };
       if (opts.optimistic) { try { opts.optimistic(store, rid); } catch (e) { if (root.console) root.console.error(e); } }
+      if (opts.patches && opts.patches.length) { // R67: optimistic edit / delete of rows already on the phone
+        entry.undo = opts.patches.map(function (p) { var m = data[p.coll] || {}; return { coll: p.coll, id: p.id, prev: m[p.id] === undefined ? null : clone(m[p.id]), row: p.row ? clone(p.row) : null }; });
+        opts.patches.forEach(function (p) { if (!data[p.coll]) return; if (p.row) data[p.coll][p.id] = p.row; else delete data[p.coll][p.id]; });
+        changed({ patch: endpoint });
+      }
       if (entry.persist) { outbox.push(entry); saveOutbox(); } else memOnly.push(entry);
       emitStatus();
       flush();
@@ -1112,6 +1124,7 @@ if (typeof module !== 'undefined') module.exports = Engine;
             offline = false; tries = 0;
             answered[e.id] = Date.now();
             removeEntry(e.id);
+            if (refused(res)) revert(e); else mergeRows(res, e.endpoint);
             var h = handlers[e.endpoint];
             if (h) { try { h(res, e, store); } catch (err) { if (root.console) root.console.error(err); } }
             emit('result', { entry: e, result: res });
@@ -1131,6 +1144,19 @@ if (typeof module !== 'undefined') module.exports = Engine;
         next();
       }).then(function (s) { flushing = null; return s; });
       return flushing;
+    }
+
+    function refused(r) { return !!r && (r.ok === false || !!r.error); }
+    /** R67: put back the rows an optimistic patch replaced (the server said no, or the change was discarded). */
+    function revert(e) {
+      (e.undo || []).forEach(function (u) { if (!data[u.coll]) return; if (u.prev) data[u.coll][u.id] = u.prev; else delete data[u.coll][u.id]; });
+    }
+    /** R67: rows a change answer carries (same shape as sync) go into the copy at once. */
+    function mergeRows(r, endpoint) {
+      if (!r || !/_change$/.test(String(endpoint || ''))) return;
+      (r.members || []).forEach(function (x) { if (x && x.code) data.members[x.code] = x; });
+      (r.attendance || []).forEach(function (x) { if (x && x.att_id) data.attendance[x.att_id] = x; });
+      (r.payments || []).forEach(function (x) { if (x && x.pay_id) data.payments[x.pay_id] = x; });
     }
 
     function authLost() {
@@ -1180,7 +1206,14 @@ if (typeof module !== 'undefined') module.exports = Engine;
       pending: function () { return clone(all()); },
       isPending: isPending,
       /** Give up on one unsent change (the page asks first). Its optimistic rows go at the next sync. */
-      discard: function (id) { answered[id] = 1; return removeEntry(id).then(function () { emitStatus(); changed({ discard: id }); }); },
+      discard: function (id) {
+        answered[id] = 1;
+        all().forEach(function (e) { if (e.id === id) revert(e); });
+        ['attendance', 'payments'].forEach(function (c) { Object.keys(data[c]).forEach(function (k) { if (data[c][k] && data[c][k]._local === id) delete data[c][k]; }); });
+        return removeEntry(id).then(function () { emitStatus(); changed({ discard: id }); });
+      },
+      /** R67: merge the rows of a change answer that came back from a direct call (same as an outbox answer). */
+      putRows: function (r) { mergeRows(r, 'x_change'); changed({ rows: true }); },
       flush: flush,
       clear: clearAll,
       setSession: function (s, who) { session = s || ''; if (who) owner = who; emitStatus(); if (session && all().length) flush(); },
@@ -1211,6 +1244,74 @@ if (typeof module !== 'undefined') module.exports = Engine;
   root.FDAStore = { open: open, newRequestId: newRequestId, memoryBackend: memoryBackend, localBackend: localBackend, idbBackend: idbBackend, autoBackend: autoBackend,
     /** Session keys shared with the member page (Peggy / a partner scanning a member QR on their own phone, R51). */
     SESSION_KEYS: { staff: 'fda_staff', partners: 'fda_psession' } };
+})(typeof window !== 'undefined' ? window : globalThis);
+</script>
+
+<style>
+/* R67 edit / delete everything: the ⋯ button on every action row, struck-through deleted rows, "Edited" tags, the Undo toast. */
+.more{flex:0 0 auto;min-width:44px;min-height:44px;padding:0 10px;border-radius:12px;border:1px solid var(--line);background:var(--surface);color:var(--ink);font:700 20px/1 var(--body);letter-spacing:.05em;cursor:pointer}
+.more:focus-visible{outline:2px solid var(--pink);outline-offset:2px}
+.emenu{flex:1 1 100%;display:flex;flex-direction:column;gap:8px;background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:10px;margin:8px 0 0}
+.emenu .ebtns{display:flex;gap:8px;flex-wrap:wrap}
+.emenu .ebtns .btn{flex:1 1 120px;min-height:48px;padding:0 12px;font-size:15px}
+.emenu .btn.del{background:transparent;color:var(--pink);border:1px solid var(--pink)}
+.emenu .btn.sec{background:var(--surface-2);color:var(--ink);border:1px solid var(--line)}
+.emenu label{display:block;font-size:13px;color:var(--muted);margin:6px 0 4px}
+.emenu input,.emenu select,.emenu textarea{width:100%;box-sizing:border-box}
+.emenu .erow{display:grid;grid-template-columns:1fr 1fr;gap:8px}.emenu .erow>div{min-width:0}
+.emenu .eerr{color:var(--pink);font-size:14px;font-weight:600}
+.emenu .ehint{font-size:13px;color:var(--muted)}
+.voided b,.voided .vx{text-decoration:line-through}
+.voided{opacity:.62}
+.etag{display:inline-block;font-size:11px;font-weight:700;letter-spacing:.04em;border-radius:999px;padding:1px 8px;border:1px solid var(--muted);color:var(--muted);white-space:normal;margin-top:3px}
+.etag.del{border-color:var(--pink);color:var(--pink)}
+.utoast{position:fixed;left:12px;right:12px;bottom:16px;max-width:480px;margin:0 auto;display:flex;align-items:center;gap:12px;background:var(--surface);border:1px solid var(--green);color:var(--ink);border-radius:14px;padding:8px 8px 8px 16px;z-index:90;box-shadow:none}
+.utoast span{flex:1;font-weight:700;min-width:0}
+.utoast .btn{min-height:48px;padding:0 18px;background:var(--green);color:var(--dark)}
+.utoast.err{border-color:var(--pink)}
+</style>
+<script>
+/* FDAEdit (R67): helpers shared by Peggy's console and the partners console. Plain ES5. */
+(function (root) {
+  function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); }
+  /** "Deleted by Pheon · reason" (struck rows) / "Edited by Pheon" tag for a row, '' when untouched. */
+  function tag(o) {
+    o = o || {};
+    var by = o.edited_by || o.editedBy || '', why = o.void_reason || o.voidReason || '';
+    var gone = o.void === true || o.voided === true || o.result === 'VOID';
+    if (gone) return '<span class="etag del">Deleted' + (by ? ' by ' + esc(by) : '') + (why ? ' · ' + esc(why) : '') + '</span>';
+    if (by) return '<span class="etag">Edited · ' + esc(by) + '</span>';
+    return '';
+  }
+  function isGone(o) { return !!o && (o.void === true || o.voided === true || o.result === 'VOID'); }
+  var timer = null, el = null;
+  /** "Saved · Undo" for 10 s (R67). undo: function or null (then only the message). */
+  function undoToast(msg, undo, err) {
+    if (!root.document) return;
+    if (!el) { el = root.document.createElement('div'); el.setAttribute('role', 'status'); el.setAttribute('aria-live', 'polite'); root.document.body.appendChild(el); }
+    clearTimeout(timer);
+    el.className = 'utoast' + (err ? ' err' : '');
+    el.innerHTML = '<span>' + esc(msg) + '</span>' + (undo ? '<button type="button" class="btn">Undo</button>' : '');
+    el.style.display = 'flex';
+    var b = el.querySelector('button');
+    if (b) b.onclick = function () { hide(); try { undo(); } catch (e) { if (root.console) root.console.error(e); } };
+    timer = setTimeout(hide, undo ? 10000 : 3000);
+  }
+  function hide() { clearTimeout(timer); if (el) el.style.display = 'none'; }
+  /** The in-page "why?" box for a delete (never window.confirm). */
+  function reasonBox(id, label) {
+    return '<label for="' + id + '">' + esc(label || 'Why delete it? (shown on the list)') + '</label><input id="' + id + '" maxlength="200" autocomplete="off" placeholder="e.g. wrong member">';
+  }
+  /** a failed answer of any write (ok:false, {error}, ERROR / UNKNOWN kinds) */
+  function failed(r) { return !r || r.ok === false || !!r.error || r.kind === 'ERROR' || r.kind === 'UNKNOWN'; }
+  /** Monday of last week (KL) - the oldest day Peggy may change (R25 window; the server checks it too). */
+  function peggyFrom(today) {
+    var d = new Date(Date.UTC(+today.slice(0, 4), +today.slice(5, 7) - 1, +today.slice(8, 10)));
+    var wd = (d.getUTCDay() + 6) % 7;
+    d.setUTCDate(d.getUTCDate() - wd - 7);
+    return d.toISOString().slice(0, 10);
+  }
+  root.FDAEdit = { tag: tag, isGone: isGone, undoToast: undoToast, hideToast: hide, reasonBox: reasonBox, failed: failed, peggyFrom: peggyFrom, esc: esc };
 })(typeof window !== 'undefined' ? window : globalThis);
 </script>
 
@@ -1354,7 +1455,7 @@ var PL = (function () {
     var miss = h.missing || {}, mt = (miss.tabs || []).concat(miss.columns || []);
     L.push({ ok: !mt.length, text: mt.length ? 'Missing: ' + mt.join(', ') + '. Tap Repair data.' : 'Every tab and column is there.' });
     if (h.importedNotMarked !== undefined) L.push({ ok: !h.importedNotMarked, text: h.importedNotMarked ? h.importedNotMarked + ' imported check-in' + (h.importedNotMarked === 1 ? ' is' : 's are') + ' not marked "Before go-live" yet. Tap Repair data.' : 'Imported history is marked "Before go-live".' });
-    if (h.possibleDuplicateMembers) L.push({ ok: false, text: h.possibleDuplicateMembers + ' possible duplicate member' + (h.possibleDuplicateMembers === 1 ? '' : 's') + ' (same name). Check the Members tab in the Sheet.' });
+    if (h.possibleDuplicateMembers) L.push({ ok: false, text: h.possibleDuplicateMembers + ' possible duplicate member' + (h.possibleDuplicateMembers === 1 ? '' : 's') + ' (same name). See the list below: tap Different people if they are not the same person.' });
     var pk = h.paymentsThisMonth || {}, pks = Object.keys(pk);
     L.push({ ok: true, text: 'Payments this month: ' + (pks.length ? pks.map(function (k) { return pk[k] + ' ' + (KIND[k] || k); }).join(', ') : 'none yet') + '.' });
     if (h.unpaid) L.push({ ok: true, text: 'Unpaid list: ' + (h.unpaid.owing || 0) + ' owing, ' + (h.unpaid.notPaidYet || 0) + ' not paid yet this month.' });
@@ -1506,7 +1607,7 @@ function drawLogin(){
       if (k === 'ok') return '<button class="key ok" type="button" data-act="lgGo" aria-label="Log in"' + (L.busy ? ' disabled' : '') + '>OK</button>';
       return '<button class="key" type="button" data-act="lgKey" data-v="' + k + '">' + k + '</button>'; }).join('') + '</div>' +
     '<div id="lg_msg" role="alert">' + (L.msg ? '<div class="' + (L.locked ? 'warn' : 'error') + '">' + esc(L.msg) + '</div>' : '') + '</div>' +
-    '<p class="ph-hint center">Your own 4–6 digit PIN. First time: type a PIN into Settings → PARTNER_PIN_&lt;your name&gt; in the studio Sheet, then log in with it.</p></div>';
+    '<p class="ph-hint center">Your 4–6 digit PIN. Forgot it? Ask another partner to reset it in Settings.</p></div>';
 }
 ACT.lgName = function(b, v){ S.login.name = v; S.login.msg = ''; drawLogin(); };
 ACT.lgKey = function(b, v){ var L = S.login; if (v === 'del') L.pin = L.pin.slice(0, -1); else if (L.pin.length < 6) L.pin += v; L.msg = ''; drawLogin(); };
@@ -1603,6 +1704,8 @@ function openStore(){
   S.store.handle('partners_manualCheckIn', onCheckInResult);
   S.store.handle('partners_recordPayment', onPayResult);
   S.store.handle('partners_registerAndCheckIn', onJoinResult);
+  S.store.handle('partners_change', onChangeResult); /* R67 */
+  S.store.on('result', function(x){ PRES[x.entry.id] = x.result; });
 }
 function initMonths(){ ['unpaidYm','calYm','moneyYm','dashYm'].forEach(function(k){ if (!S[k]) S[k] = S.ym; }); }
 function onStoreChange(){ setSlot(); if (S.tab === 'today' && S.td.data && $('td_list')) drawTodayList(); }
@@ -1635,7 +1738,7 @@ function onPayResult(r, entry){
     if (P) { P.saving = false; P.rid = ''; if (/refresh/i.test(r.error || '')) openPay(P.code, P.target, P.month); else drawPay(true); }
   } else {
     r.name = r.name || meta.name;
-    if (P) { P.done = r; P.saving = false; drawPay(); toast('Payment saved ✓'); } else toast('Payment sent ✓ ' + (r.name || ''));
+    if (P) { P.done = r; P.saving = false; drawPay(); } else toast('Payment sent ✓ ' + (r.name || ''));
     if (S.td.res && S.td.res.code === meta.code && r.newStatus && r.newStatus !== 'NONE' && $('td_status')) { S.td.res = Object.assign({}, S.td.res, { kind: r.newStatus, message: 'Paid ' + r.amountLabel + '. Thank you!', changed: '', provisional: false }); if (!P || P.target !== 'td_pay') $('td_status').innerHTML = statusHtml(); }
   }
   if (S.tab === 'today') refreshToday();
@@ -1760,11 +1863,22 @@ function drawTodayList(){
   var d = S.td.data; if (!d || !$('td_list')) return;
   var rows = PL.mergeRows(d.rows || [], pendingRows('attendance'), d.classKey);
   $('td_pax').textContent = rows.length + ' in';
-  $('td_list').innerHTML = rows.map(function(x){
+  /* R67: deleted / changed rows on this phone show at once (struck through); the server list follows */
+  var A = (S.store && S.store.get('attendance')) || {};
+  var shown = rows.filter(function(x){ var l = A[x.attId || x.att_id]; return !(l && l.result === 'VOID'); });
+  var gone = local('attendance').filter(function(a){ return a.class_key === d.classKey && a.result === 'VOID'; });
+  $('td_list').innerHTML = shown.map(function(x){
+    var id = x.attId || x.att_id, l = A[id] || {}, guest = !x.code, it = id && !x.pending ? { kind: 'att', id: id, code: x.code, guest: guest, result: x.result, classKey: d.classKey, name: x.name, row: l } : null;
+    if (it && guest) it.payRow = pGuestPay(l, x.name, d.classKey.slice(0, 10));
     return '<div class="item' + (x.pending ? ' pending' : '') + '"><div class="grow"><b>' + esc(x.name) + '</b> <small>' + esc(x.code) + '</small>' + (x.health || x.healthNote ? ' <span class="pill hn">Health</span>' : '') +
-      '<br><small>' + (x.pending ? 'saving…' : esc(x.time) + (x.via ? ' · ' + esc(x.via) : '')) + '</small></div><span class="acts" style="align-items:center">' + pillHtml(x.result) +
-      (x.code ? '<button class="btn ' + (x.result === 'UNPAID' ? '' : 'secondary ') + 'sm" type="button" data-act="payOpen" data-v="' + esc(x.code) + '">Pay</button>' : '') + '</span></div>';
-  }).join('') || '<p class="muted">Nobody yet.</p>';
+      '<br><small>' + (x.pending ? 'saving…' : esc(x.time) + (x.via ? ' · ' + esc(x.via) : '')) + '</small> ' + ptag(l) + '</div><span class="acts" style="align-items:center">' + pillHtml(x.result) +
+      (x.code ? '<button class="btn ' + (x.result === 'UNPAID' ? '' : 'secondary ') + 'sm" type="button" data-act="payOpen" data-v="' + esc(x.code) + '">Pay</button>' : '') + (it ? pmore(it) : '') + '</span>' + (it ? pslot(it) : '') + '</div>';
+  }).concat(gone.map(function(a){
+    var it = { kind: 'att', id: a.att_id, code: a.code, guest: !a.code, result: 'VOID', classKey: a.class_key, name: a.code ? ((memberLocal(a.code) || {}).name || a.code) : (a.guest_name || 'Guest'), row: a };
+    if (it.guest) it.payRow = pGuestPay(a, it.name, d.classKey.slice(0, 10));
+    return '<div class="item voided"><div class="grow"><b>' + esc(it.name) + '</b> <small>' + esc(a.code) + '</small><br>' + ptag(a) + '</div><span class="acts">' + pillHtml('VOID') + pmore(it) + '</span>' + pslot(it) + '</div>';
+  })).join('') || '<p class="muted">Nobody yet.</p>';
+  if (PEM.key && slotOf(PEM.key) && PITEMS[PEM.key]) { var mb = document.querySelector('[data-act="pm"][data-v="' + PEM.key + '"]'); if (mb) mb.setAttribute('aria-expanded', 'true'); drawPmenu(); }
   var t = PL.totalsWithPending(d.totals, pendingRows('payments'), todayStr(), S.ym), ct = t.collectedToday || {}, cm = t.collectedMonth || {};
   var waiting = rows.filter(function(x){ return x.pending; }).length; /* outbox check-ins count at once */
   if (t.checkedInClass !== undefined) t.checkedInClass += waiting;
@@ -1821,10 +1935,11 @@ function checkIn(code){
   if ($('td_q')) $('td_q').value = '';
   $('td_results').innerHTML = ''; $('td_status').innerHTML = statusHtml();
   var ok = prov && prov.kind !== 'ALREADY' && prov.kind !== 'NO_CLASS';
-  S.td.res.rid = S.store.write('partners_manualCheckIn', function(r){ return [code, d.classKey || '', r]; }, {
+  var cid = S.td.res.rid = S.store.write('partners_manualCheckIn', function(r){ return [code, d.classKey || '', r]; }, {
     label: 'Check in ' + name, meta: { code: code, name: name },
     optimistic: function(st, r){ if (ok) st.put('attendance', 'local-' + r, { att_id: 'local-' + r, code: code, class_key: d.classKey, plan_month: prov.planMonth, result: prov.kind, via: 'Manual', ts: new Date().toISOString(), name: name, _local: r }); }
   });
+  FDAEdit.undoToast('Checked in ' + name, function(){ pundo(cid, function(res){ return res.attId && ['PAID', 'UNPAID', 'TRIAL'].indexOf(res.kind) >= 0 ? { type: 'checkin', action: 'delete', id: res.attId, reason: 'Undo' } : null; }); if (S.td.res && S.td.res.rid === cid) { S.td.res = null; if ($('td_status')) $('td_status').innerHTML = statusHtml(); } });
   $('td_status').innerHTML = statusHtml();
 }
 ACT.tdCheck = function(b, v){ checkIn(v); };
@@ -1837,7 +1952,12 @@ ACT.tdPay = function(b, v){
 };
 ACT.payOpen = function(b, v){ openPay(v, 'dr_pay'); };
 CHG.tdClass = function(t){ S.td.classKey = t.value; S.td.res = null; refreshToday(); };
-CHG.tdInst = function(t){ run(W('partners_setInstructor', S.td.data.classKey, t.value, rid()), 'Instructor saved'); };
+CHG.tdInst = function(t){ var key = S.td.data.classKey; run(W('partners_setInstructor', key, t.value, rid())).then(function(r){ if (r) undoInstructor(key, r, refreshToday); }); };
+/* R67: Undo of an instructor change = set the one before (a blank one cannot be set back: the server needs a partner) */
+function undoInstructor(key, r, after){
+  if (!r.before) { toast('Instructor saved'); return; }
+  FDAEdit.undoToast('Instructor saved', function(){ run(W('partners_setInstructor', key, r.before, rid()), 'Undone ✓').then(function(x){ if (x && after) after(); }); });
+}
 INP.td_q = function(t){
   S.td.q = t.value; var qq = S.td.q.trim();
   if (!qq) { S.td.results = null; $('td_results').innerHTML = ''; return; }
@@ -1898,7 +2018,9 @@ function onJoinResult(r, entry){
   if (!J || J.rid !== entry.id) { toast(r.ok ? 'Registered: ' + r.name + ' (' + r.code + ')' : 'Join not saved: ' + (r.error || ''), !r.ok); return; }
   J.saving = false;
   if (!r.ok) { if ($('jn_save')) { $('jn_save').disabled = false; $('jn_save').textContent = 'Register & check in'; } if ($('jn_err')) $('jn_err').innerHTML = '<div class="error">' + esc(r.error || 'Not saved') + '</div>'; return; }
-  J.result = r.checkIn; J.code = r.code; J.duplicate = r.duplicate; toast('Member registered ✓'); drawJoin(); refreshToday();
+  J.result = r.checkIn; J.code = r.code; J.duplicate = r.duplicate; drawJoin(); refreshToday();
+  if (r.duplicate) toast('Already a member ✓');
+  else FDAEdit.undoToast('Member registered ✓', function(){ pchange({ type: 'member', action: 'delete', id: r.code, reason: 'Undo' }, { undo: true }); S.td.join = null; drawerClose(); });
 }
 ACT.joinAgain = function(){ S.td.join = blankJoin(); drawJoin(); };
 
@@ -1980,10 +2102,11 @@ ACT.paySave = function(b){
   b.disabled = true;
   var name = P.ctx.name;
   P.saving = true;
-  P.rid = S.store.write('partners_recordPayment', function(r){ req.requestId = r; return [req]; }, {
+  var prid = P.rid = S.store.write('partners_recordPayment', function(r){ req.requestId = r; return [req]; }, {
     label: 'Payment ' + name, meta: { code: P.code, name: name },
     optimistic: function(st, r){ st.put('payments', 'local-' + r, { pay_id: 'local-' + r, code: P.code, month: P.month, kind: o.kind, amount: chk.collect, rebate: chk.rebate || 0, method: req.method, received_by: req.receivedBy, void: false, ts: new Date().toISOString(), date: todayStr(), _local: r }); }
   });
+  FDAEdit.undoToast('Payment saved', function(){ pundo(prid, function(res){ return res.payId ? { type: 'payment', action: 'delete', id: res.payId, reason: 'Undo' } : null; }); if (PAY && PAY.rid === prid) { PAY = null; if (S.tab === 'today' && $('td_status')) $('td_status').innerHTML = statusHtml(); } });
   drawPay();
 };
 ACT.payReceipt = function(b, v, id){
@@ -2047,7 +2170,7 @@ $('drawer').addEventListener('click', function(e){ if (e.target === $('drawer'))
 VIEWS.members = function(){
   var f = S.mem;
   $main.innerHTML = '<div class="bar"><input type="search" id="mq" class="grow" placeholder="Search name, code or phone" value="' + esc(f.q) + '" aria-label="Search members" autocomplete="off"></div>' +
-    '<div class="seg">' + [['all','All'],['active','Active this month'],['lapsed','Lapsed'],['inactive','Inactive']].map(function(c){
+    '<div class="seg">' + [['all','All'],['active','Active this month'],['lapsed','Lapsed'],['inactive','Inactive'],['deleted','Deleted']].map(function(c){
       return '<button class="chip" type="button" data-act="memMode" data-v="' + c[0] + '" aria-pressed="' + (f.mode === c[0]) + '">' + c[1] + '</button>'; }).join('') + '</div>' +
     '<div id="mlist"></div>';
   if (f.list === null) loadMembers(); else memberList();
@@ -2057,7 +2180,8 @@ function loadMembers(){
   /* R60(e): the local index draws at once (names/codes); the full list (plan, last visit) follows */
   var loc = local('members'), q = S.mem.q.trim();
   if (loc.length && $('mlist')) {
-    var l = q ? PL.searchMembers(loc, q, 60) : loc.filter(function(m){ return S.mem.mode === 'inactive' ? m.status === 'Inactive' : S.mem.mode === 'all' || m.status !== 'Inactive'; }).slice(0, 60);
+    loc = loc.filter(function(m){ return (m.status === 'Deleted') === (S.mem.mode === 'deleted'); }); /* R67: deleted members only under Deleted */
+    var l = q ? PL.searchMembers(loc, q, 60) : loc.filter(function(m){ return S.mem.mode === 'inactive' ? m.status === 'Inactive' : S.mem.mode === 'all' || S.mem.mode === 'deleted' || m.status !== 'Inactive'; }).slice(0, 60);
     $('mlist').innerHTML = '<p class="sub">Loading details…</p><div class="cols two">' + l.map(function(m){ return memRow({ code: m.code, name: m.name, status: m.status, health_note: m.healthNote }); }).join('') + '</div>';
   } else if ($('mlist')) $('mlist').innerHTML = spin();
   var want = S.mem.mode + '|' + q;
@@ -2067,7 +2191,7 @@ function planName(p){ return p === 'UNL' ? 'Unlimited' : p === 'STD' ? 'Standard
 function memRow(m){
   return '<button class="mrow" type="button" data-act="memOpen" data-v="' + esc(m.code) + '"><span class="code">' + esc(m.code) + '</span><span class="nm"><b>' + esc(m.name) + '</b><small>' +
     (m.plan !== undefined ? esc(planName(m.plan)) + (m.paid ? ' · ' + rm(m.paid) : '') + ' · ' + (m.visitsThisMonth || 0) + ' this month · last ' + (m.lastVisit ? fmtD(m.lastVisit) : 'never') : '&nbsp;') + '</small></span>' +
-    (m.health_note ? '<span class="pill hn">Health</span>' : '') + (m.status === 'Inactive' ? '<span class="pill grey">Inactive</span>' : '') + '</button>';
+    (m.health_note ? '<span class="pill hn">Health</span>' : '') + (m.status === 'Inactive' ? '<span class="pill grey">Inactive</span>' : '') + (m.status === 'Deleted' ? '<span class="pill no">Deleted</span>' : '') + (m.edited_by ? '<span class="etag">Edited · ' + esc(m.edited_by) + '</span>' : '') + '</button>';
 }
 function memberList(){
   var l = S.mem.list || [];
@@ -2096,7 +2220,7 @@ function drawMember(m){
   var code = m.code;
   S.open = { code: code, link: '', ic: '', m: m };
   openDrawer(drawerHead(m.code + ' · ' + m.name, esc(planName(m.plan)) + (m.paid ? ' · ' + rm(m.paid) + ' paid' : '') + ' · ' + (m.visitsThisMonth || 0) + ' class' + (m.visitsThisMonth === 1 ? '' : 'es') + ' this month') +
-    '<div class="bar"><button class="btn" type="button" data-act="memPay">Record payment</button><button class="btn secondary" type="button" data-act="memCheck">Check in now</button></div>' +
+    (m.status === 'Deleted' ? '' : '<div class="bar"><button class="btn" type="button" data-act="memPay">Record payment</button><button class="btn secondary" type="button" data-act="memCheck">Check in now</button></div>') + '<div id="memDel"></div>' +
     '<div class="f2">' + MFIELDS.map(function(f){ return '<div><label for="mf_' + f[0] + '">' + f[1] + '</label><input id="mf_' + f[0] + '" value="' + esc(m[f[0]]) + '"></div>'; }).join('') +
     '<div><label for="mf_id_no">IC / passport no.</label><div class="inline" style="margin:0"><input id="mf_id_no" value="' + esc(m.id_no) + '" readonly aria-describedby="ic_hint"><button class="btn secondary sm" type="button" data-act="icShow">Show IC</button></div><div class="ph-hint" id="ic_hint">Hidden until you tap Show IC (it is logged).</div></div></div>' +
     '<label for="mf_address">Address</label><textarea id="mf_address">' + esc(m.address) + '</textarea>' +
@@ -2107,9 +2231,11 @@ function drawMember(m){
     '<label for="mf_other_illness">Other illness / injuries / surgery</label><textarea id="mf_other_illness">' + esc(m.other_illness) + '</textarea></div>' +
     '<div class="f2"><div><label for="mf_status">Status</label><select id="mf_status">' + opts(['Active','Inactive'], m.status) + '</select></div><div class="chk"><input type="checkbox" id="mf_trial_used"' + (m.trial_used ? ' checked' : '') + '><label for="mf_trial_used">Free trial used</label></div></div>' +
     '<label for="mf_notes">Notes</label><textarea id="mf_notes">' + esc(m.notes) + '</textarea>' +
-    '<p style="margin-top:14px"><button class="btn block" type="button" data-act="memSave">Save changes</button></p>' +
+    '<p style="margin-top:14px"><button class="btn block" type="button" data-act="memSave">Save changes</button></p>' + (m.edited_by ? '<p class="ph-hint">Last edited by ' + esc(m.edited_by) + '.</p>' : '') +
+    '<div class="card"><h3>Activity</h3><div id="memAct"></div></div>' +
     '<div class="card"><h3>QR card</h3><div id="cardArea">' + spin() + '</div></div>');
-  loadCard(code);
+  drawMemDel(); memberActivity();
+  if (m.status !== 'Deleted') loadCard(code); else $('cardArea').innerHTML = '<p class="muted">Deleted: the QR code does not work.</p>';
 }
 ACT.memPay = function(){ var c = S.open.code; openPay(c, 'dr_pay'); };
 ACT.memCheck = function(){ var c = S.open.code; drawerClose(); S.tab = 'today'; render(); setTimeout(function(){ checkIn(c); }, 0); };
@@ -2125,7 +2251,10 @@ ACT.memSave = function(){
   MFIELDS.concat([['address'],['emergency_name'],['emergency_phone'],['physical_limits'],['allergies'],['other_illness'],['status'],['notes']]).forEach(function(f){ p[f[0]] = val('mf_' + f[0]); });
   if (S.open.ic) p.id_no = val('mf_id_no'); /* a masked IC is never sent back */
   p.trial_used = $('mf_trial_used').checked;
-  run(W('partners_saveMember', code, p), 'Saved').then(function(r){ if (r) { S.mem.list = null; if (S.tab === 'members') loadMembers(); syncSoon(); } });
+  run(W('partners_saveMember', code, p)).then(function(r){ if (!r) return; S.mem.list = null; if (S.tab === 'members') loadMembers(); syncSoon();
+    if (r.unchanged || !r.before || !Object.keys(r.before).length) { toast('Saved'); return; }
+    var back = Object.assign({ requestId: rid() }, r.before);
+    FDAEdit.undoToast('Saved', function(){ run(W('partners_saveMember', code, back), 'Undone ✓').then(function(x){ if (x) { S.mem.list = null; if (S.tab === 'members') loadMembers(); syncSoon(); if (S.open && S.open.code === code) openMember(code); } }); }); });
 };
 function loadCard(code){
   api('partners_memberLink', code).then(function(r){
@@ -2263,8 +2392,10 @@ ACT.calDay = function(b, v){ S.calSel = v; var all = document.querySelectorAll('
 ACT.calPrev = function(){ S.calYm = addMonth(S.calYm, -1); VIEWS.roster(); };
 ACT.calNext = function(){ S.calYm = addMonth(S.calYm, 1); VIEWS.roster(); };
 CHG.cal_m = function(t){ if (t.value) { S.calYm = t.value; VIEWS.roster(); } };
-CHG.calCleaner = function(t){ run(W('partners_setCleaner', t.getAttribute('data-k'), t.value, rid()), 'Cleaner saved').then(function(r){ if (r) loadCal(); }); };
-CHG.calCleaned = function(t){ run(W('partners_setCleaned', t.getAttribute('data-k'), t.checked, rid()), t.checked ? 'Marked cleaned' : 'Marked not cleaned').then(function(r){ if (!r) t.checked = !t.checked; else loadCal(); }); };
+CHG.calCleaner = function(t){ var wk = t.getAttribute('data-k'); run(W('partners_setCleaner', wk, t.value, rid())).then(function(r){ if (!r) return; loadCal();
+  if (r.before && r.before !== t.value) FDAEdit.undoToast('Cleaner saved', function(){ run(W('partners_setCleaner', wk, r.before, rid()), 'Undone ✓').then(function(x){ if (x) loadCal(); }); }); else toast('Cleaner saved'); }); };
+CHG.calCleaned = function(t){ var wk = t.getAttribute('data-k'), on = t.checked; run(W('partners_setCleaned', wk, on, rid())).then(function(r){ if (!r) { t.checked = !on; return; } loadCal();
+  FDAEdit.undoToast(on ? 'Marked cleaned' : 'Marked not cleaned', function(){ run(W('partners_setCleaned', wk, !!r.before, rid()), 'Undone ✓').then(function(x){ if (x) loadCal(); }); }); }); };
 
 /* ---------- Add class (R53 EXTRA: any day incl. Friday, counts for a month, may replace a cancelled class) ---------- */
 ACT.calAddOpen = function(){
@@ -2286,8 +2417,9 @@ ACT.calAddGo = function(b){
   var ch = { type: 'EXTRA', date: val('ex_date'), start: val('ex_start'), end: val('ex_end'), countsForMonth: val('ex_cf'), replaces: val('ex_rep'), note: val('ex_note'), requestId: RID.extra };
   if (!ch.date) return toast('Choose the date', true);
   b.disabled = true;
-  run(W('partners_classChange', ch), 'Class added').then(function(r){
+  run(W('partners_classChange', ch)).then(function(r){
     b.disabled = false; if (!r) return;
+    FDAEdit.undoToast('Class added', function(){ run(W('partners_classChange', { type: 'UNDO', changeId: r.changeId, requestId: rid() }), 'Undone ✓').then(function(x){ if (x) { loadCal(); syncSoon(); } }); });
     RID.extra = null; S.calSel = ch.date;
     if (ch.date.slice(0, 7) !== S.calYm) { S.calYm = ch.date.slice(0, 7); VIEWS.roster(); } else loadCal();
     syncSoon();
@@ -2311,14 +2443,21 @@ function drawSession(){
   var cancelled = d.cancelled || s.cancelled, extra = d.kind === 'EXTRA' || s.kind === 'EXTRA';
   var tags = (cancelled ? '<span class="pill grey">Cancelled' + (s.note ? ': ' + esc(s.note) : '') + '</span> ' : '') + (extra ? '<span class="pill extra">' + esc(PL.extraTag(s.classKey ? s : { kind: 'EXTRA', classKey: d.classKey, countsFor: d.classKey.slice(0, 7) })) + '</span>' : '');
   var others = []; ((S.cal || {}).days || []).forEach(function(dd){ dd.sessions.forEach(function(x){ if (!x.cancelled && x.classKey !== d.classKey && x.classKey <= todayStr() + ' 23:59') others.push({ v: x.classKey, l: classLabel(x.classKey) }); }); });
+  /* R67: every attendee and payment row has ⋯ (move / edit / delete with a reason / restore); deleted rows stay, struck through */
+  var LP = (S.store && S.store.get('payments')) || {};
   var rows = (d.rows || []).map(function(x){
-    return '<div class="item' + (x.voided ? ' void' : '') + '"><div class="grow"><b>' + esc(x.name) + '</b> <small>' + esc(x.code) + '</small><br><small>' + esc(x.via || '') + (x.time ? ' · ' + esc(x.time) : '') + (x.note ? ' · ' + esc(x.note) : '') + '</small></div>' + pillHtml(x.voided ? 'VOID' : x.result) +
-      (x.voided ? '' : '<div class="inline" id="sa_' + esc(x.attId) + '"><button class="btn ghost sm" type="button" data-act="saRemAsk" data-id="' + esc(x.attId) + '">Remove</button><select id="mv_' + esc(x.attId) + '" aria-label="Move to class">' + opts(others, '', 'Move to…') + '</select><button class="btn secondary sm" type="button" data-act="saMove" data-id="' + esc(x.attId) + '">Move</button></div>') + '</div>';
+    var it = { kind: 'att', id: x.attId, code: x.code, guest: !!x.guest || !x.code, result: x.voided ? 'VOID' : x.result, classKey: d.classKey, name: x.name, row: { edited_by: x.editedBy, void_reason: x.voidReason, result: x.voided ? 'VOID' : x.result } };
+    if (it.guest) it.payRow = pGuestPay((S.store && S.store.get('attendance') || {})[x.attId], x.name, d.classKey.slice(0, 10)) || (d.payments || []).filter(function(p){ return !p.code && p.name === x.name; }).map(function(p){ return LP[p.payId] || { pay_id: p.payId, amount: p.amount, method: p.method, received_by: p.received_by }; })[0];
+    return '<div class="item' + (x.voided ? ' voided' : '') + '"><div class="grow"><b>' + esc(x.name) + '</b> <small>' + esc(x.code) + '</small><br><small>' + esc(x.via || '') + (x.time ? ' · ' + esc(x.time) : '') + (x.note ? ' · ' + esc(x.note) : '') + '</small> ' + ptag(it.row) + '</div>' + pillHtml(x.voided ? 'VOID' : x.result) + pmore(it) + pslot(it) + '</div>';
   }).join('');
-  var pays = (d.payments || []).map(function(p){ return '<div class="item"><div class="grow"><b>' + esc(p.name) + '</b><br><small>' + esc(KIND[p.kind] || p.kind) + ' · ' + esc(p.method) + ' · ' + esc(p.received_by) + (p.rebate ? ' · rebate ' + rm(p.rebate) : '') + '</small></div><span class="amt">' + rm(p.amount) + '</span></div>'; }).join('');
+  var pays = (d.payments || []).map(function(p){
+    var row = LP[p.payId] || { pay_id: p.payId, code: p.code, month: p.month, kind: p.kind, amount: p.amount, rebate: p.rebate, method: p.method, received_by: p.received_by, void: p.voided, void_reason: p.voidReason, edited_by: p.editedBy, ts: d.classKey.slice(0, 10) + 'T00:00:00+08:00' };
+    var it = { kind: 'pay', id: p.payId, code: p.code, guest: !p.code, void: !!p.voided, name: p.name, row: row, payRow: row };
+    return '<div class="item' + (p.voided ? ' voided' : '') + '"><div class="grow"><b>' + esc(p.name) + '</b><br><small class="vx">' + esc(KIND[p.kind] || p.kind) + ' · ' + esc(p.method) + ' · ' + esc(p.received_by) + (p.rebate ? ' · rebate ' + rm(p.rebate) : '') + '</small> ' + ptag(row) + '</div><span class="amt">' + rm(p.amount) + '</span>' + pmore(it) + pslot(it) + '</div>'; }).join('');
   var ctl;
   if (extra) ctl = '<div class="card"><h3>Extra class</h3><p class="sub">Counts for ' + esc(monthLabel(s.countsFor || d.classKey.slice(0, 7))) + (s.replaces ? ' · replaces ' + esc(classLabel(s.replaces)) : '') + (s.note ? ' · ' + esc(s.note) : '') + '</p>' +
-    '<button class="btn ghost sm" type="button" data-act="sessUndo" data-id="' + esc(s.changeId || '') + '"' + (d.pax ? ' disabled title="Move or remove the check-ins first"' : '') + '>Remove this extra class</button>' + (d.pax ? '<p class="ph-hint">Has check-ins: move or remove them first.</p>' : '') + '</div>';
+    '<div id="exEdit"><div class="bar"><button class="btn secondary sm" type="button" data-act="exEditOpen" data-id="' + esc(s.changeId || '') + '">Edit this extra class</button>' +
+    '<button class="btn ghost sm" type="button" data-act="sessUndo" data-id="' + esc(s.changeId || '') + '"' + (d.pax ? ' disabled title="Move or remove the check-ins first"' : '') + '>Remove this extra class</button></div></div>' + (d.pax ? '<p class="ph-hint">Has check-ins: move or remove them first (its date, time and month cannot change either).</p>' : '') + '</div>';
   else if (cancelled) ctl = '<div class="card"><h3>Cancelled</h3><p class="sub">' + esc(s.note || 'No note') + '</p><button class="btn sm" type="button" data-act="sessUndo" data-id="' + esc(s.changeId || '') + '">Uncancel (class runs)</button></div>';
   else ctl = '<div class="card"><h3>Cancel this class</h3><div id="sessCancel"><label for="sc_note">Why (shown on the calendar)</label><input id="sc_note" maxlength="200" placeholder="e.g. public holiday"><p><button class="btn ghost sm" type="button" data-act="sessCancel"' + (d.pax ? ' disabled' : '') + '>Cancel class</button></p>' + (d.pax ? '<p class="ph-hint">Has check-ins: move or remove them first.</p>' : '') + '</div></div>';
   var addDl = '<datalist id="sa_dl">' + local('members').slice(0, 800).map(function(m){ return '<option value="' + esc(m.code + ' ' + m.name) + '">'; }).join('') + '</datalist>';
@@ -2333,28 +2472,50 @@ function drawSession(){
 }
 function sessEdit(e, msg){
   e.classKey = e.classKey || S.sess.key; e.requestId = rid();
-  return run(W('partners_attendanceEdit', e), msg).then(function(r){ if (r) { loadSession(); loadCal(); syncSoon(); } return r; });
+  var key = e.classKey;
+  return run(W('partners_attendanceEdit', e)).then(function(r){
+    if (r) { loadSession(); loadCal(); syncSoon();
+      var back = e.op === 'add' && r.attId ? { op: 'remove', att_id: r.attId, reason: 'Undo', classKey: key } : e.op === 'editClass' && r.before ? { op: 'editClass', classKey: key, instructor: r.before.instructor, notes: r.before.notes } : null;
+      if (back) FDAEdit.undoToast(msg, function(){ back.requestId = rid(); run(W('partners_attendanceEdit', back), 'Undone ✓').then(function(x){ if (x) { if (S.sess) loadSession(); loadCal(); syncSoon(); } }); }); else toast(msg); }
+    return r; });
 }
-CHG.sessInst = function(t){ run(W('partners_setInstructor', S.sess.key, t.value, rid()), 'Instructor saved').then(function(r){ if (r) loadCal(); }); };
+CHG.sessInst = function(t){ var key = S.sess.key; run(W('partners_setInstructor', key, t.value, rid())).then(function(r){ if (r) { loadCal(); undoInstructor(key, r, function(){ loadCal(); if (S.sess) loadSession(); }); } }); };
 ACT.sessNotes = function(){ sessEdit({ op: 'editClass', instructor: val('ss_inst'), notes: val('ss_notes') }, 'Notes saved'); };
+/* R67: edit an extra class (times / month / note; date, time and month only while it has no check-ins) */
+ACT.exEditOpen = function(b, v, id){
+  var s = calSession(S.sess.key) || {};
+  $('exEdit').innerHTML = '<div class="emenu"><div class="erow"><div><label for="xe_d">Date</label><input type="date" id="xe_d" value="' + esc(S.sess.key.slice(0, 10)) + '"></div><div><label for="xe_cf">Counts for month</label><select id="xe_cf">' + opts(PL.countsForOptions(S.sess.key.slice(0, 10)), s.countsFor || S.sess.key.slice(0, 7)) + '</select></div></div>' +
+    '<div class="erow"><div><label for="xe_s">Start</label><input type="time" id="xe_s" value="' + esc(s.start || S.sess.key.slice(11, 16)) + '"></div><div><label for="xe_e">End</label><input type="time" id="xe_e" value="' + esc(s.end || '') + '"></div></div>' +
+    '<label for="xe_n">Note</label><input id="xe_n" maxlength="200" value="' + esc(s.note || '') + '"><div class="ebtns"><button class="btn" type="button" data-act="exEditGo" data-id="' + esc(id) + '">Save</button><button class="btn sec" type="button" data-act="exEditNo">Cancel</button></div></div>';
+};
+ACT.exEditNo = function(){ drawSession(); };
+ACT.exEditGo = function(b, v, id){
+  var ch = { type: 'EDIT', changeId: id, date: val('xe_d'), start: val('xe_s'), end: val('xe_e'), countsForMonth: val('xe_cf'), note: val('xe_n'), requestId: rid() };
+  b.disabled = true;
+  run(W('partners_classChange', ch)).then(function(r){
+    b.disabled = false; if (!r) return;
+    var nk = r.classKey || S.sess.key; loadCal(); syncSoon(); S.sess.key = nk; setTimeout(loadSession, 50);
+    if (r.before && !r.unchanged) FDAEdit.undoToast('Class saved', function(){ var bb = r.before; run(W('partners_classChange', { type: 'EDIT', changeId: id, date: bb.date, start: bb.start, end: bb.end, countsForMonth: bb.countsForMonth, note: bb.note, requestId: rid() }), 'Undone ✓').then(function(x){ if (x) { loadCal(); if (S.sess) { S.sess.key = x.classKey || S.sess.key; loadSession(); } } }); });
+    else toast('Nothing changed');
+  });
+};
 ACT.sessCancel = function(b0){ ask(b0, 'Cancel ' + classLabel(S.sess.key) + '? Members will not be able to check in to it.', sessCancelGo); };
 function sessCancelGo(b){
   b.disabled = true;
-  run(W('partners_classChange', { type: 'CANCEL', classKey: S.sess.key, note: val('sc_note'), requestId: rid() }), 'Class cancelled').then(function(r){ b.disabled = false; if (r) { loadCal(); setTimeout(loadSession, 50); syncSoon(); } });
+  run(W('partners_classChange', { type: 'CANCEL', classKey: S.sess.key, note: val('sc_note'), requestId: rid() })).then(function(r){ b.disabled = false; if (r) { loadCal(); setTimeout(loadSession, 50); syncSoon();
+    FDAEdit.undoToast('Class cancelled', function(){ run(W('partners_classChange', { type: 'UNDO', changeId: r.changeId, requestId: rid() }), 'Undone ✓').then(function(x){ if (x) { loadCal(); if (S.sess) setTimeout(loadSession, 50); syncSoon(); } }); }); } });
 }
 ACT.sessUndo = function(b, v, id){
   if (!id) return toast('Refresh the calendar and try again', true);
   b.disabled = true;
-  run(W('partners_classChange', { type: 'UNDO', changeId: id, requestId: rid() }), 'Done').then(function(r){
+  run(W('partners_classChange', { type: 'UNDO', changeId: id, requestId: rid() })).then(function(r){
     b.disabled = false; if (!r) return;
+    var was = S.sess && S.sess.data;
+    FDAEdit.undoToast(was && was.kind === 'EXTRA' ? 'Extra class removed' : 'Class runs again', function(){ run(W('partners_classChange', { type: 'REDO', changeId: id, requestId: rid() }), 'Undone ✓').then(function(x){ if (x) { loadCal(); syncSoon(); } }); });
     var c = S.sess.data; loadCal(); syncSoon();
     if (c && c.kind === 'EXTRA') drawerClose(); else setTimeout(loadSession, 50);
   });
 };
-ACT.saRemAsk = function(b, v, id){ $('sa_' + id).innerHTML = '<span class="sub">Remove this check-in?</span><button class="btn sm" type="button" data-act="saRemGo" data-id="' + esc(id) + '">Yes, remove</button><button class="btn secondary sm" type="button" data-act="saRemNo">Cancel</button>'; };
-ACT.saRemNo = function(){ drawSession(); };
-ACT.saRemGo = function(b, v, id){ sessEdit({ op: 'remove', att_id: id }, 'Removed'); };
-ACT.saMove = function(b, v, id){ var to = val('mv_' + id); if (!to) toast('Choose the class to move to', true); else sessEdit({ op: 'move', att_id: id, toClassKey: to }, 'Moved'); };
 ACT.saAdd = function(){ var code = codeFrom(val('sa_add')); if (!code) toast('Choose a member', true); else sessEdit({ op: 'add', code: code }, 'Added'); };
 </script>
 
@@ -2382,14 +2543,18 @@ function drawMoney(){
   var m = S.money, c = S.close, B = S.boot || {};
   var pays = (m.payments || []).map(function(p){
     var rcp = p.receipt_no ? (p.receipt_url ? '<a class="btn secondary sm" target="_blank" rel="noopener" href="' + esc(p.receipt_url) + '">Receipt ' + esc(p.receipt_no) + '</a>' : '<span class="pill grey">' + esc(p.receipt_no) + '</span>') :
-      (p.void ? '' : '<button class="btn secondary sm" type="button" data-act="mkReceipt" data-src="Payment" data-id="' + esc(p.pay_id) + '">Make receipt</button>');
-    return '<div class="item' + (p.void ? ' void' : '') + '"><div class="grow"><b>' + esc(p.name) + '</b> <small>' + esc(p.code) + '</small><br><small>' + fmtD(p.date) + ' · ' + esc(KIND[p.kind] || p.kind) + ' · ' + esc(p.method) + ' · held by ' + esc(p.received_by) +
-      (Number(p.rebate) > 0 ? ' · <span style="color:var(--yellow)">rebate ' + rm(p.rebate) + (p.rebate_reason ? ' (' + esc(p.rebate_reason) + ')' : '') + '</span>' : '') + (p.void ? ' · voided: ' + esc(p.void_reason) : '') + '</small></div><span class="amt">' + rm(p.amount) + '</span>' +
-      '<div class="inline" id="pact_' + esc(p.pay_id) + '">' + rcp + (p.void ? '<span class="pill no">Void</span>' : '<button class="btn ghost sm" type="button" data-act="voidAsk" data-id="' + esc(p.pay_id) + '">Void</button>') + '</div></div>';
+      (p.void || !p.code ? '' : '<button class="btn secondary sm" type="button" data-act="mkReceipt" data-src="Payment" data-id="' + esc(p.pay_id) + '">Make receipt</button>');
+    var lp = ((S.store && S.store.get('payments')) || {})[p.pay_id], row = Object.assign({}, p, lp ? { ts: lp.ts } : {});
+    var it = { kind: 'pay', id: p.pay_id, code: p.code, guest: !p.code, void: !!p.void, name: p.name, row: row, payRow: row };
+    return '<div class="item' + (p.void ? ' voided' : '') + '"><div class="grow"><b>' + esc(p.name) + '</b> <small>' + esc(p.code) + '</small><br><small class="vx">' + fmtD(p.date) + ' · ' + esc(KIND[p.kind] || p.kind) + ' · ' + esc(p.method) + ' · held by ' + esc(p.received_by) +
+      (Number(p.rebate) > 0 ? ' · <span style="color:var(--yellow)">rebate ' + rm(p.rebate) + (p.rebate_reason ? ' (' + esc(p.rebate_reason) + ')' : '') + '</span>' : '') + '</small> ' + ptag(p) + '</div><span class="amt">' + rm(p.amount) + '</span>' + pmore(it) +
+      '<div class="inline" id="pact_' + esc(p.pay_id) + '">' + rcp + '</div>' + pslot(it) + '</div>';
   }).join('');
-  var oi = (m.otherIncome || []).map(function(o){ var rcp = o.receipt_no ? (o.receipt_url ? '<a class="btn secondary sm" target="_blank" rel="noopener" href="' + esc(o.receipt_url) + '">Receipt ' + esc(o.receipt_no) + '</a>' : '<span class="pill grey">' + esc(o.receipt_no) + '</span>') : '<button class="btn secondary sm" type="button" data-act="mkReceipt" data-src="OtherIncome" data-id="' + esc(o.inc_id) + '">Make receipt</button>';
-    return '<div class="item"><div class="grow"><b>' + esc(o.from_name ? o.from_name + ' – ' + (o.description || o.type) : o.description) + '</b><br><small>' + fmtD(o.date) + ' · ' + esc(o.type) + ' · ' + esc(o.method) + ' · held by ' + esc(o.received_by) + '</small></div><span class="amt">' + rm(o.amount) + '</span><div class="inline">' + rcp + '</div></div>'; }).join('');
-  var ex = (m.expenses || []).map(function(x){ return '<div class="item"><div class="grow"><b>' + esc(x.category) + (x.description ? ' – ' + esc(x.description) : '') + '</b><br><small>' + fmtD(x.date) + ' · paid by ' + esc(x.paid_by) + '</small></div><span class="amt">' + rm(x.amount) + '</span>' + (x.receipt_url ? '<a class="btn secondary sm" target="_blank" rel="noopener" href="' + esc(x.receipt_url) + '">Photo</a>' : '') + '</div>'; }).join('');
+  var oi = (m.otherIncome || []).map(function(o){ var rcp = o.void ? '' : o.receipt_no ? (o.receipt_url ? '<a class="btn secondary sm" target="_blank" rel="noopener" href="' + esc(o.receipt_url) + '">Receipt ' + esc(o.receipt_no) + '</a>' : '<span class="pill grey">' + esc(o.receipt_no) + '</span>') : '<button class="btn secondary sm" type="button" data-act="mkReceipt" data-src="OtherIncome" data-id="' + esc(o.inc_id) + '">Make receipt</button>';
+    var it = { kind: 'inc', id: o.inc_id, void: !!o.void, name: o.from_name || o.description, row: o };
+    return '<div class="item' + (o.void ? ' voided' : '') + '"><div class="grow"><b>' + esc(o.from_name ? o.from_name + ' – ' + (o.description || o.type) : o.description) + '</b><br><small class="vx">' + fmtD(o.date) + ' · ' + esc(o.type) + ' · ' + esc(o.method) + ' · held by ' + esc(o.received_by) + '</small> ' + ptag(o) + '</div><span class="amt">' + rm(o.amount) + '</span>' + pmore(it) + '<div class="inline">' + rcp + '</div>' + pslot(it) + '</div>'; }).join('');
+  var ex = (m.expenses || []).map(function(x){ var it = { kind: 'exp', id: x.exp_id, void: !!x.void, name: x.category, row: x };
+    return '<div class="item' + (x.void ? ' voided' : '') + '"><div class="grow"><b>' + esc(x.category) + (x.description ? ' – ' + esc(x.description) : '') + '</b><br><small class="vx">' + fmtD(x.date) + ' · paid by ' + esc(x.paid_by) + '</small> ' + ptag(x) + '</div><span class="amt">' + rm(x.amount) + '</span>' + (x.receipt_url ? '<a class="btn secondary sm" target="_blank" rel="noopener" href="' + esc(x.receipt_url) + '">Photo</a>' : '') + pmore(it) + pslot(it) + '</div>'; }).join('');
   var tr = (c.transfers || []).length ? c.transfers.map(function(t){ return '<div class="item"><b class="grow">' + esc(t.text) + '</b><span class="pill ' + (t.direction === 'toFit' ? 'info' : 'unpaid') + '">' + (t.direction === 'toFit' ? 'Transfer to studio' : 'Studio owes') + '</span></div>'; }).join('') : '<p class="muted">No transfers needed.</p>';
   var hold = '<table class="hold"><tr><th>Holder</th><th>Collected</th><th>Paid out</th><th>To transfer</th></tr>' + (c.byHolder || []).filter(function(h){ return h.collected || h.paidOut; }).map(function(h){
     return '<tr><td>' + esc(h.holder) + '</td><td>' + rm(h.collected) + '</td><td>' + rm(h.paidOut) + '</td><td>' + (h.studioHeld ? '<span class="sub">studio-held</span>' : '<b>' + rm(h.toTransfer) + '</b>') + '</td></tr>'; }).join('') + '</table>';
@@ -2427,15 +2592,14 @@ ACT.mnPick = function(b, v){
   openPay(v, 'mn_pay', mnPayYm());
 };
 ACT.mkReceipt = function(b, v, id){ b.disabled = true; run(W('partners_receipt', b.getAttribute('data-src'), id), 'Receipt made').then(function(r){ if (r) loadMoney(); else b.disabled = false; }); };
-ACT.voidAsk = function(b, v, id){ $('pact_' + id).innerHTML = '<input id="vr_' + esc(id) + '" placeholder="Reason for voiding" aria-label="Reason"><button class="btn sm" type="button" data-act="voidGo" data-id="' + esc(id) + '">Void payment</button><button class="btn secondary sm" type="button" data-act="voidNo">Cancel</button>'; };
-ACT.voidNo = function(){ drawMoney(); };
-ACT.voidGo = function(b, v, id){ run(W('partners_voidPayment', id, val('vr_' + id), rid()), 'Voided').then(function(r){ if (r) { loadMoney(); syncSoon(); } }); };
-ACT.oiAdd = function(b){ b.disabled = true; RID.oi = RID.oi || rid(); run(W('partners_addOtherIncome', { date: val('oi_date'), type: val('oi_type'), from: val('oi_from'), description: val('oi_desc'), amount: Number(val('oi_amt')), method: val('oi_method'), received_by: val('oi_by'), requestId: RID.oi }), 'Income added').then(function(r){ if (r) { RID.oi = null; loadMoney(); } else b.disabled = false; }); };
+/* R67: Undo of an add = delete it (reason "Undo"); the row stays in the list struck through */
+function undoAdd(type, id, msg){ FDAEdit.undoToast(msg, function(){ run(W('partners_change', { type: type, action: 'delete', id: id, reason: 'Undo', requestId: rid() }), 'Undone ✓').then(function(x){ if (x) loadMoney(); }); }); }
+ACT.oiAdd = function(b){ b.disabled = true; RID.oi = RID.oi || rid(); run(W('partners_addOtherIncome', { date: val('oi_date'), type: val('oi_type'), from: val('oi_from'), description: val('oi_desc'), amount: Number(val('oi_amt')), method: val('oi_method'), received_by: val('oi_by'), requestId: RID.oi })).then(function(r){ if (r) { RID.oi = null; loadMoney(); undoAdd('income', r.row.inc_id, 'Income added'); } else b.disabled = false; }); };
 ACT.exAdd = function(b){
   b.disabled = true; RID.ex = RID.ex || rid();
   fileToB64($('xp_file').files[0]).then(function(f){
-    return run(W('partners_addExpense', { date: val('xp_date'), category: val('xp_cat'), description: val('xp_desc'), amount: Number(val('xp_amt')), paid_by: val('xp_by'), requestId: RID.ex }, f ? f.b64 : '', f ? f.name : '', f ? f.mime : ''), 'Expense added');
-  }, function(){ toast('Could not read that file', true); return null; }).then(function(r){ if (r) { RID.ex = null; loadMoney(); } else if ($('exBtn')) $('exBtn').disabled = false; });
+    return run(W('partners_addExpense', { date: val('xp_date'), category: val('xp_cat'), description: val('xp_desc'), amount: Number(val('xp_amt')), paid_by: val('xp_by'), requestId: RID.ex }, f ? f.b64 : '', f ? f.name : '', f ? f.mime : ''));
+  }, function(){ toast('Could not read that file', true); return null; }).then(function(r){ if (r) { RID.ex = null; loadMoney(); undoAdd('expense', r.row.exp_id, 'Expense added'); } else if ($('exBtn')) $('exBtn').disabled = false; });
 };
 ACT.stmt = function(b){ b.disabled = true; run(W('partners_statementPdf', S.moneyYm), 'Statement ready').then(function(r){ b.disabled = false; if (r && r.url) $('stmtOut').innerHTML = '<a class="btn good sm" target="_blank" rel="noopener" href="' + esc(r.url) + '">Open statement PDF</a>'; }); };
 function fileToB64(file){
@@ -2513,19 +2677,23 @@ function drawCarry(){
     '<p><button class="btn" type="button" data-act="coNew">Send request</button></p></div>';
   var list = (S.carry || []).map(function(c){
     var chips = P.map(function(p){ var st = (c.ok || {})[p] || ''; return '<span class="pill ' + (st === 'yes' ? 'paid' : st === 'no' ? 'no' : 'grey') + '">' + esc(p) + ' ' + (st === 'yes' ? '✓' : st === 'no' ? '✗' : '—') + '</span>'; }).join(' ');
-    var stc = c.status === 'Approved' ? 'paid' : c.status === 'Rejected' ? 'no' : c.status === 'Expired' ? 'grey' : 'unpaid';
+    var stc = c.status === 'Approved' ? 'paid' : c.status === 'Rejected' ? 'no' : (c.status === 'Expired' || c.status === 'Withdrawn' || c.status === 'Revoked') ? 'grey' : 'unpaid';
+    var it = { kind: 'carry', id: c.co_id, status: c.status, requested_by: c.requested_by, name: c.name };
     var mine = c.status === 'Pending' && (c.ok || {})[S.actor] !== 'yes';
-    return '<div class="item"><div class="grow"><b>' + esc(c.name) + '</b> <small>' + esc(c.code) + '</small><br><small>' + c.classes + ' class' + (c.classes === 1 ? '' : 'es') + ' · ' + esc(monthLabel(c.from_month)) + ' → ' + esc(monthLabel(c.to_month)) + ' · asked by ' + esc(c.requested_by) + ' on ' + fmtD(String(c.req_ts).slice(0, 10)) + '</small><br><small>' + esc(c.reason) + '</small><div style="margin-top:6px">' + chips + '</div></div>' +
-      '<span class="pill ' + stc + '">' + esc(c.status) + '</span>' +
+    return '<div class="item' + (c.status === 'Withdrawn' || c.status === 'Revoked' ? ' voided' : '') + '"><div class="grow"><b>' + esc(c.name) + '</b> <small>' + esc(c.code) + '</small><br><small>' + c.classes + ' class' + (c.classes === 1 ? '' : 'es') + ' · ' + esc(monthLabel(c.from_month)) + ' → ' + esc(monthLabel(c.to_month)) + ' · asked by ' + esc(c.requested_by) + ' on ' + fmtD(String(c.req_ts).slice(0, 10)) + '</small><br><small>' + esc(c.reason) + '</small><div style="margin-top:6px">' + chips + '</div></div>' +
+      '<span class="pill ' + stc + '">' + esc(c.status) + '</span>' + pmore(it) + (c.edited_by && (c.status === 'Withdrawn' || c.status === 'Revoked') ? '<span class="etag del">' + esc(c.status) + ' by ' + esc(c.edited_by) + '</span>' : '') + pslot(it) +
       (mine ? '<div class="inline"><span class="sub">As ' + esc(S.actor) + ':</span><button class="btn good sm" type="button" data-act="coDecide" data-id="' + esc(c.co_id) + '" data-v="approve">Approve</button><button class="btn ghost sm" type="button" data-act="coDecide" data-id="' + esc(c.co_id) + '" data-v="reject">Reject</button></div>' : '') + '</div>';
   }).join('');
   $main.innerHTML = '<div class="cols two"><div>' + form + '</div><div class="card"><h3>Requests</h3>' + (list || '<p class="muted">No requests yet.</p>') + '</div></div>';
 }
 ACT.coNew = function(){
   var code = codeFrom(val('co_m'));
-  run(W('partners_carryRequest', { code: code, from_month: val('co_from'), classes: Number(val('co_n')), reason: val('co_r'), requestId: rid() }), 'Request sent').then(function(r){ if (r) VIEWS.carry(); });
+  run(W('partners_carryRequest', { code: code, from_month: val('co_from'), classes: Number(val('co_n')), reason: val('co_r'), requestId: rid() })).then(function(r){ if (!r) return; VIEWS.carry();
+    FDAEdit.undoToast('Request sent', function(){ run(W('partners_carryDecide', r.co_id, 'withdraw', rid()), 'Undone ✓').then(function(x){ if (x) VIEWS.carry(); }); }); });
 };
-ACT.coDecide = function(b, v, id){ run(W('partners_carryDecide', id, v, rid()), v === 'approve' ? 'Approved as ' + S.actor : 'Rejected').then(function(r){ if (r) { VIEWS.carry(); syncSoon(); } }); };
+ACT.coDecide = function(b, v, id){ run(W('partners_carryDecide', id, v, rid())).then(function(r){ if (!r) return; VIEWS.carry(); syncSoon();
+  var undo = r.status === 'Approved' ? 'revoke' : 'untick';
+  FDAEdit.undoToast(v === 'approve' ? 'Approved as ' + S.actor : 'Rejected', function(){ run(W('partners_carryDecide', id, undo, rid()), 'Undone ✓').then(function(x){ if (x) { VIEWS.carry(); syncSoon(); } }); }); }); };
 
 /* ===================== SETTINGS ===================== */
 VIEWS.settings = function(){
@@ -2585,7 +2753,7 @@ ACT.myPin = function(b){
 };
 ACT.hcRun = function(b){
   b.disabled = true; $('hcOut').innerHTML = spin();
-  api('partners_healthCheck').then(function(h){ b.disabled = false; $('hcOut').innerHTML = '<div class="hl" style="margin-top:10px">' + PL.healthLines(h).map(function(l){ return '<div class="' + (l.ok ? '' : 'bad') + '">' + esc(l.text) + '</div>'; }).join('') + '</div>'; }, function(e){ b.disabled = false; $('hcOut').innerHTML = ''; handleErr(e); });
+  api('partners_healthCheck').then(function(h){ b.disabled = false; S.health = h; $('hcOut').innerHTML = '<div class="hl" style="margin-top:10px">' + PL.healthLines(h).map(function(l){ return '<div class="' + (l.ok ? '' : 'bad') + '">' + esc(l.text) + '</div>'; }).join('') + '</div>' + dupGroupsHtml(h); }, function(e){ b.disabled = false; $('hcOut').innerHTML = ''; handleErr(e); });
 };
 ACT.hcRepair = function(b0){ ask(b0, 'Repair now? Rewrites wrongly-typed cells as text, adds missing columns, re-checks paid / unpaid for this and last month. Nothing is deleted.', hcRepairGo); };
 function hcRepairGo(b){
@@ -2597,6 +2765,261 @@ ACT.trig = function(b){
   run(W('partners_installTriggers'), 'Triggers installed').then(function(r){ b.disabled = false; if (!r) return; $('trigOut').innerHTML = '<div class="hl">' + [['Daily 8 am job', r.daily], ['6 pm warm-up', r.prewarm], ['New registrations (form)', r.form]].map(function(x){ return '<div class="' + (x[1] ? '' : 'bad') + '">' + esc(x[0]) + ': ' + (x[1] ? 'on' : 'not on') + '</div>'; }).join('') + ((r.messages || []).length ? '<div>' + (r.messages || []).map(esc).join('<br>') + '</div>' : '') + '</div>'; });
 };
 ACT.imRun = function(b){ b.disabled = true; $('imOut').innerHTML = spin(); run(W('partners_runImport', { attendanceFormId: val('im_a'), registrationSheetId: val('im_r'), currentMonthFormId: val('im_c'), currentMonthSheetId: val('im_s') })).then(function(r){ b.disabled = false; $('imOut').innerHTML = r ? '<div class="warn"><pre class="t">' + esc(JSON.stringify(r.counts, null, 1)) + '</pre></div>' : ''; if (r) { S.all = null; S.mem.list = null; syncSoon(); } }); };
+</script>
+
+<!-- Partners console: R67 edit / delete / undo on every action row (⋯ menus, struck rows, Saved · Undo), R69 duplicate groups. -->
+<script>
+/* PITEMS: key -> item {kind:'att'|'pay'|'inc'|'exp'|'carry', id, ...}. Each row has a ⋯ button and an empty slot under it. */
+var PITEMS = {}, PRES = {}, PEM = { key: '', mode: '' };
+function pkey(kind, id){ return kind + ':' + id; }
+function pmore(it){ var k = pkey(it.kind, it.id); PITEMS[k] = it; return '<button type="button" class="more" data-act="pm" data-v="' + esc(k) + '" aria-label="Edit or delete" aria-expanded="false">⋯</button>'; }
+function pslot(it){ return '<div class="emslot" id="ems_' + esc(pkey(it.kind, it.id)).replace(/[^A-Za-z0-9_-]/g, '_') + '" style="flex:1 1 100%"></div>'; }
+function slotOf(k){ return $('ems_' + k.replace(/[^A-Za-z0-9_-]/g, '_')); }
+function ptag(o){ return FDAEdit.tag(o); }
+function closeMenus(){ document.querySelectorAll('.emslot').forEach(function(x){ x.innerHTML = ''; }); document.querySelectorAll('.more[aria-expanded="true"]').forEach(function(b){ b.setAttribute('aria-expanded', 'false'); }); }
+ACT.pm = function(b, v){
+  var open = PEM.key === v && slotOf(v) && slotOf(v).innerHTML;
+  closeMenus();
+  if (open) { PEM = { key: '', mode: '' }; return; }
+  PEM = { key: v, mode: '' }; b.setAttribute('aria-expanded', 'true'); drawPmenu();
+};
+function drawPmenu(){ var s = slotOf(PEM.key), it = PITEMS[PEM.key]; if (!s || !it) return; s.innerHTML = pmenuHtml(it); var f = s.querySelector('input,select'); if (f && PEM.mode) try { f.focus(); } catch (e) {} }
+function btns(list){ return '<div class="ebtns">' + list.join('') + '</div>'; }
+function eb(act, label, cls){ return '<button type="button" class="btn ' + (cls === undefined ? 'sec' : cls) + '" data-act="pmDo" data-v="' + act + '">' + label + '</button>'; }
+function gone(it){ return it.void || it.result === 'VOID' || it.status === 'Withdrawn' || it.status === 'Revoked'; }
+function pmenuHtml(it){
+  var h = '<div class="emenu" role="group" aria-label="Edit or delete">', m = PEM.mode;
+  if (it.kind === 'carry') {
+    var acts = [];
+    if (it.status === 'Pending' && it.requested_by === S.actor) acts.push(eb('cWithdraw', 'Withdraw request', 'del'));
+    if (it.status === 'Approved') acts.push(eb('cRevoke', 'Revoke', 'del'));
+    if (it.status === 'Withdrawn' && it.requested_by === S.actor) acts.push(eb('cRestore', 'Bring back', ''));
+    if (it.status === 'Revoked') acts.push(eb('cRestore', 'Restore approval', ''));
+    if (!acts.length) h += '<p class="ehint">' + (it.status === 'Pending' ? 'Only ' + esc(it.requested_by) + ' (who asked) can withdraw it.' : 'Nothing to change: this request is ' + esc(it.status) + '.') + '</p>';
+    return h + btns(acts.concat([eb('close', 'Close')])) + '</div>';
+  }
+  if (gone(it)) return h + '<p class="ehint">' + ptag(it.row || it) + '</p>' + btns([eb('restore', 'Restore', ''), eb('close', 'Close')]) + '</div>';
+  if (m === 'delete') return h + FDAEdit.reasonBox('pmWhy') + '<div class="eerr" id="pmErr"></div>' + btns([eb('delGo', 'Delete' + (it.guest ? ' guest + payment' : ''), 'del'), eb('close', 'Keep')]) + '</div>';
+  if (m === 'move') {
+    var ks = {}, o = '';
+    ((S.td.data || {}).weekClasses || []).concat(calClasses()).forEach(function(c){ if (c.classKey !== it.classKey && !ks[c.classKey]) { ks[c.classKey] = 1; o += '<option value="' + esc(c.classKey) + '">' + esc(c.label || classLabel(c.classKey)) + '</option>'; } });
+    return h + '<label for="pmTo">Move ' + esc(it.name) + ' to</label><select id="pmTo">' + (o || '<option value="">No other class</option>') + '</select><div class="eerr" id="pmErr"></div>' + btns([eb('moveGo', 'Move', ''), eb('close', 'Cancel')]) + '</div>';
+  }
+  if (m === 'editGuest') {
+    var p = it.payRow || {}, B = S.boot || {};
+    return h + '<label for="pmGn">Guest name</label><input id="pmGn" maxlength="60" value="' + esc(it.name) + '"><div class="erow"><div><label for="pmGa">Amount RM</label><input id="pmGa" inputmode="decimal" value="' + esc(p.amount !== undefined ? p.amount : ((B.prices || {}).per || 15)) + '"></div><div><label for="pmGm">Method</label><select id="pmGm">' + opts(B.methods || ['Cash'], p.method) + '</select></div></div>' +
+      '<label for="pmGb">Received by</label><select id="pmGb">' + opts(B.holders || [S.actor], p.received_by || S.actor) + '</select><div class="eerr" id="pmErr"></div>' + btns([eb('guestGo', 'Save', ''), eb('close', 'Cancel')]) + '</div>';
+  }
+  if (m === 'editPay') return h + pPayForm(it) + '</div>';
+  if (m === 'editInc') return h + pIncForm(it) + '</div>';
+  if (m === 'editExp') return h + pExpForm(it) + '</div>';
+  var a = [];
+  if (it.kind === 'att' && !it.guest) a.push(eb('move', 'Move to another class'));
+  if (it.guest) a.push(eb('editGuest', 'Edit guest'));
+  if (it.kind === 'pay' && !it.guest) a.push(eb('editPay', 'Edit payment'));
+  if (it.kind === 'inc') a.push(eb('editInc', 'Edit income'));
+  if (it.kind === 'exp') a.push(eb('editExp', 'Edit expense'));
+  a.push(eb('delete', 'Delete', 'del')); a.push(eb('close', 'Close'));
+  return h + btns(a) + '</div>';
+}
+function calClasses(){ var out = []; ((S.cal || {}).days || []).forEach(function(d){ (d.sessions || []).forEach(function(x){ if (!x.cancelled && x.classKey <= todayStr() + ' 23:59') out.push({ classKey: x.classKey, label: classLabel(x.classKey) }); }); }); return out.reverse(); }
+function stampRow(row, extra){ return Object.assign({}, row, { edited_by: S.actor, edited_at: new Date().toISOString() }, extra || {}); }
+function pType(it){ return it.kind === 'inc' ? 'income' : it.kind === 'exp' ? 'expense' : it.guest ? 'guest' : it.kind === 'att' ? 'checkin' : 'payment'; }
+ACT.pmDo = function(b, a){
+  var it = PITEMS[PEM.key]; if (!it) return;
+  var err = function(t){ var x = $('pmErr'); if (x) x.textContent = t; else toast(t, true); };
+  if (a === 'close') { closeMenus(); PEM = { key: '', mode: '' }; return; }
+  if (['delete', 'move', 'editGuest', 'editPay', 'editInc', 'editExp'].indexOf(a) >= 0) { PEM.mode = a; if (a === 'editPay') PPE = null; drawPmenu(); return; }
+  var type = pType(it);
+  if (a === 'delGo') { var why = val('pmWhy').trim(); if (!why) return err('Please type why.'); pchange({ type: type, action: 'delete', id: it.id, reason: why }, { patches: pDelPatches(it, why) }); return; }
+  if (a === 'restore') { pchange({ type: type, action: 'restore', id: it.id }, { patches: pRestorePatches(it) }); return; }
+  if (a === 'moveGo') { var to = val('pmTo'); if (!to) return err('Pick a class.'); var lr = (S.store && S.store.get('attendance') || {})[it.id];
+    pchange({ type: 'checkin', action: 'edit', id: it.id, patch: { classKey: to } }, { patches: lr ? [{ coll: 'attendance', id: it.id, row: stampRow(lr, { class_key: to }) }] : null }); return; }
+  if (a === 'guestGo') { var nm = val('pmGn').trim(), amt = Number(val('pmGa')); if (!nm) return err('Please type the name.'); if (!isFinite(amt) || amt < 0) return err('Check the amount.');
+    var patch = { name: nm, amount: Math.round(amt * 100) / 100, method: val('pmGm'), receivedBy: val('pmGb') }, pt = [];
+    if (it.payRow && it.payRow.pay_id) pt.push({ coll: 'payments', id: it.payRow.pay_id, row: stampRow(it.payRow, { amount: patch.amount, method: patch.method, received_by: patch.receivedBy, guest_name: nm }) });
+    pchange({ type: 'guest', action: 'edit', id: it.id, patch: patch }, { patches: pt }); return; }
+  if (a === 'payGo') return pPaySave(it, err);
+  if (a === 'incGo') return pIncSave(it, err);
+  if (a === 'expGo') return pExpSave(it, err);
+  if (a === 'cWithdraw' || a === 'cRevoke' || a === 'cRestore') {
+    var dec = a === 'cWithdraw' ? 'withdraw' : a === 'cRevoke' ? 'revoke' : 'restore';
+    run(W('partners_carryDecide', it.id, dec, rid())).then(function(r){ if (!r) return; closeMenus(); VIEWS.carry(); syncSoon();
+      var back = dec === 'restore' ? (it.status === 'Withdrawn' ? 'withdraw' : 'revoke') : 'restore';
+      FDAEdit.undoToast(dec === 'withdraw' ? 'Withdrawn' : dec === 'revoke' ? 'Revoked' : 'Restored', function(){ run(W('partners_carryDecide', it.id, back, rid()), 'Undone ✓').then(function(x){ if (x) { VIEWS.carry(); syncSoon(); } }); }); });
+  }
+};
+function pDelPatches(it, why){
+  var st = S.store; if (!st) return null; var A = st.get('attendance') || {}, P = st.get('payments') || {}, pt = [];
+  if (it.kind === 'att' && A[it.id]) pt.push({ coll: 'attendance', id: it.id, row: stampRow(A[it.id], { result: 'VOID', prev_result: A[it.id].result, void_reason: why }) });
+  if (it.kind === 'pay' && P[it.id]) pt.push({ coll: 'payments', id: it.id, row: stampRow(P[it.id], { void: true, void_reason: why }) });
+  if (it.guest && it.payRow && P[it.payRow.pay_id] && it.kind === 'att') pt.push({ coll: 'payments', id: it.payRow.pay_id, row: stampRow(P[it.payRow.pay_id], { void: true, void_reason: why }) });
+  return pt;
+}
+function pRestorePatches(it){
+  var st = S.store; if (!st) return null; var A = st.get('attendance') || {}, P = st.get('payments') || {}, pt = [];
+  if (it.kind === 'att' && A[it.id]) pt.push({ coll: 'attendance', id: it.id, row: stampRow(A[it.id], { result: A[it.id].prev_result || (it.guest ? 'GUEST' : 'UNPAID'), void_reason: '' }) });
+  if (it.kind === 'pay' && P[it.id]) pt.push({ coll: 'payments', id: it.id, row: stampRow(P[it.id], { void: false, void_reason: '' }) });
+  return pt;
+}
+/* every R67 change goes through the outbox (requestId; retried when offline) */
+function pchange(req, o){
+  o = o || {};
+  var label = (req.action === 'delete' ? 'Delete ' : req.action === 'restore' ? 'Restore ' : 'Edit ') + req.type;
+  var r = S.store.write('partners_change', function(id){ req.requestId = id; return [req]; }, { label: label, patches: o.patches || null, meta: { type: req.type, action: req.action, id: req.id, undo: !!o.undo } });
+  closeMenus(); PEM = { key: '', mode: '' };
+  if (o.undo) toast('Undone ✓');
+  else FDAEdit.undoToast(req.action === 'delete' ? 'Deleted' : req.action === 'restore' ? 'Restored' : 'Saved', function(){ pundo(r, function(res){ return pinverse(req, res); }); });
+  return r;
+}
+function pinverse(req, res){
+  if (req.action === 'edit') return res.before ? { type: req.type, action: 'edit', id: req.id, patch: res.before } : null;
+  if (req.action === 'delete') return { type: res.type || req.type, action: 'restore', id: req.id };
+  return { type: res.type || req.type, action: 'delete', id: req.id, reason: 'Undo' };
+}
+/* Undo of an outbox write: still waiting -> drop it; answered -> the inverse change */
+function pundo(r, undoOf){
+  if (S.store.isPending(r)) { S.store.discard(r).then(function(){ toast('Undone ✓'); afterChange(); }); return; }
+  var res = PRES[r];
+  if (!res) { toast('Still sending. Try Undo again in a moment.', true); return; }
+  if (FDAEdit.failed(res)) { toast('Nothing to undo (it was not saved).'); return; }
+  var u = undoOf(res); if (!u) { toast('Nothing to undo.'); return; }
+  if (u.endpoint) { S.store.write(u.endpoint, u.args, { label: 'Undo' }); toast('Undone ✓'); return; }
+  pchange(u, { undo: true });
+}
+function onChangeResult(res, entry){
+  var undo = entry.meta && entry.meta.undo;
+  if (FDAEdit.failed(res)) { FDAEdit.hideToast(); toast((undo ? 'Undo not done: ' : 'Not saved: ') + ((res && res.error) || ''), true); }
+  else if (res.receiptVoided || res.warning) toast([res.receiptVoided ? 'Receipt ' + res.receiptVoided + ' voided. Make a new one if needed.' : '', res.warning || ''].join(' ').trim(), !!res.warning);
+  afterChange();
+}
+/* redraw what is on screen after a change was answered */
+function afterChange(){
+  if (S.sess && !$('drawer').classList.contains('hidden')) loadSession();
+  else if (S.open && S.open.m && !$('drawer').classList.contains('hidden')) memberActivity();
+  if (S.tab === 'today') refreshToday();
+  else if (S.tab === 'money' && typeof loadMoney === 'function') loadMoney();
+  else if (S.tab === 'roster') loadCal();
+  else if (S.tab === 'members') { S.mem.list = null; loadMembers(); }
+}
+
+/* ---- payment edit (options from the member's earlier payments on this phone; the server re-checks) */
+var PPE = null;
+function pPayBefore(p, month){ return local('payments').filter(function(x){ return x.pay_id !== p.pay_id && x.code === p.code && x.month === month && !x.void && (String(x.ts) + '|' + x.pay_id) < (String(p.ts) + '|' + p.pay_id); }); }
+function pPayForm(it){
+  var p = it.row, B = S.boot || {}, m = memberLocal(p.code) || {}, set = settingsLocal();
+  if (!PPE || PPE.id !== p.pay_id) PPE = { id: p.pay_id, month: p.month, kind: p.kind, method: p.method, by: p.received_by, rebate: Number(p.rebate) || 0, reason: p.rebate_reason || '' };
+  var months = [S.ym, addMonth(S.ym, -1)]; if (months.indexOf(PPE.month) < 0) months.unshift(PPE.month);
+  var op = set ? Engine.paymentOptions({ code: p.code, bday_month: m.bday_month }, PPE.month, pPayBefore(p, PPE.month), PL.engineSettings(set)) : [];
+  return '<label>For month</label><div class="seg">' + months.map(function(x){ return '<button class="chip" type="button" data-act="ppMonth" data-v="' + x + '" aria-pressed="' + (x === PPE.month) + '">' + esc(monthLabel(x)) + '</button>'; }).join('') + '</div>' +
+    '<label>What was paid</label>' + (op.length ? op.map(function(o){ return '<button class="optcard' + (o.kind === PPE.kind ? ' on' : '') + '" type="button" data-act="ppKind" data-v="' + esc(o.kind) + '"><span>' + esc(o.label) + '</span><b>' + esc(Engine.fmtRM(o.amount)) + '</b></button>'; }).join('') : '<p class="ehint">Nothing more can be paid for this month.</p>') +
+    '<div class="erow"><div><label for="ppM">Method</label><select id="ppM">' + opts(B.methods || ['Cash'], PPE.method) + '</select></div><div><label for="ppB">Received by</label><select id="ppB">' + opts(B.holders || [S.actor], PPE.by) + '</select></div></div>' +
+    '<div class="erow"><div><label for="ppR">Rebate RM</label><input id="ppR" inputmode="decimal" value="' + esc(PPE.rebate || '') + '"></div><div><label for="ppW">Rebate reason</label><input id="ppW" value="' + esc(PPE.reason) + '"></div></div>' +
+    (p.receipt_no ? '<p class="ehint">Receipt ' + esc(p.receipt_no) + ' will be voided. Make a new one after saving.</p>' : '') +
+    '<div class="eerr" id="pmErr"></div>' + btns([eb('payGo', 'Save changes', ''), eb('close', 'Cancel')]);
+}
+function keepPPE(){ if ($('ppM')) PPE.method = val('ppM'); if ($('ppB')) PPE.by = val('ppB'); if ($('ppR')) PPE.rebate = val('ppR'); if ($('ppW')) PPE.reason = val('ppW'); }
+ACT.ppMonth = function(b, v){ keepPPE(); PPE.month = v; PPE.kind = ''; drawPmenu(); };
+ACT.ppKind = function(b, v){ keepPPE(); PPE.kind = v; drawPmenu(); };
+function pPaySave(it, err){
+  keepPPE(); var p = it.row, m = memberLocal(p.code) || {}, set = settingsLocal(), o = null;
+  if (set) Engine.paymentOptions({ code: p.code, bday_month: m.bday_month }, PPE.month, pPayBefore(p, PPE.month), PL.engineSettings(set)).forEach(function(x){ if (x.kind === PPE.kind) o = x; });
+  if (!o) return err('Choose what was paid.');
+  var chk = PL.rebateCheck(o.amount, String(PPE.rebate || ''), PPE.reason); if (chk.error) return err(chk.error);
+  var patch = { month: PPE.month, kind: o.kind, amount: o.amount, rebate: chk.rebate || 0, rebateReason: chk.rebate ? String(PPE.reason).trim() : '', method: PPE.method, receivedBy: PPE.by };
+  var lr = (S.store.get('payments') || {})[p.pay_id];
+  pchange({ type: 'payment', action: 'edit', id: p.pay_id, patch: patch }, { patches: lr ? [{ coll: 'payments', id: p.pay_id, row: stampRow(lr, { month: PPE.month, kind: o.kind, amount: chk.collect, rebate: chk.rebate || 0, method: PPE.method, received_by: PPE.by }) }] : null });
+  PPE = null;
+}
+/* ---- other income / expense edit */
+function pIncForm(it){
+  var o = it.row, B = S.boot || {};
+  return '<div class="erow"><div><label for="piD">Date</label><input type="date" id="piD" value="' + esc(String(o.date).slice(0, 10)) + '"></div><div><label for="piT">Type</label><select id="piT">' + opts(B.incomeTypes || ['Other'], o.type) + '</select></div></div>' +
+    '<div class="erow"><div><label for="piF">From (name)</label><input id="piF" value="' + esc(o.from_name || '') + '"></div><div><label for="piA">Amount RM</label><input id="piA" inputmode="decimal" value="' + esc(o.amount) + '"></div></div>' +
+    '<label for="piX">Description</label><input id="piX" value="' + esc(o.description || '') + '">' +
+    '<div class="erow"><div><label for="piM">Method</label><select id="piM">' + opts(B.methods || ['Cash'], o.method) + '</select></div><div><label for="piB">Received by</label><select id="piB">' + opts(B.holders || [S.actor], o.received_by) + '</select></div></div>' +
+    (o.receipt_no ? '<p class="ehint">Receipt ' + esc(o.receipt_no) + ' will be voided. Make a new one after saving.</p>' : '') +
+    '<div class="eerr" id="pmErr"></div>' + btns([eb('incGo', 'Save changes', ''), eb('close', 'Cancel')]);
+}
+function pIncSave(it, err){
+  var a = Number(val('piA')); if (!(a > 0)) return err('Enter an amount above RM0.00');
+  pchange({ type: 'income', action: 'edit', id: it.id, patch: { date: val('piD'), type: val('piT'), from: val('piF'), description: val('piX'), amount: a, method: val('piM'), receivedBy: val('piB') } });
+}
+function pExpForm(it){
+  var x = it.row, B = S.boot || {};
+  return '<div class="erow"><div><label for="peD">Date</label><input type="date" id="peD" value="' + esc(String(x.date).slice(0, 10)) + '"></div><div><label for="peC">Category</label><select id="peC">' + opts(B.expenseCategories || ['Other'], x.category) + '</select></div></div>' +
+    '<div class="erow"><div><label for="peA">Amount RM</label><input id="peA" inputmode="decimal" value="' + esc(x.amount) + '"></div><div><label for="peB">Paid by</label><select id="peB">' + opts(B.holders || [S.actor], x.paid_by) + '</select></div></div>' +
+    '<label for="peX">Description</label><input id="peX" value="' + esc(x.description || '') + '">' +
+    '<label for="peF">' + (x.receipt_url ? 'Replace the photo (optional)' : 'Receipt photo (optional)') + '</label><input id="peF" type="file" accept="image/*,application/pdf">' +
+    '<div class="eerr" id="pmErr"></div>' + btns([eb('expGo', 'Save changes', ''), eb('close', 'Cancel')]);
+}
+function pExpSave(it, err){
+  var a = Number(val('peA')); if (!(a > 0)) return err('Enter an amount above RM0.00');
+  var patch = { date: val('peD'), category: val('peC'), description: val('peX'), amount: a, paidBy: val('peB') }, f = $('peF') && $('peF').files[0];
+  fileToB64(f).then(function(file){
+    if (file) { patch.fileBase64 = file.b64; patch.fileName = file.name; patch.mime = file.mime; }
+    pchange({ type: 'expense', action: 'edit', id: it.id, patch: patch });
+  }, function(){ err('Could not read that file'); });
+}
+
+/* ---- guest helpers on the local copy */
+function pGuestPay(attRow, name, day){
+  var hit = null, P = local('payments');
+  if (attRow && attRow.pay_id) P.forEach(function(p){ if (p.pay_id === attRow.pay_id) hit = p; });
+  if (!hit) P.forEach(function(p){ if (!hit && !p.code && p.kind === 'DROPIN' && String(p.guest_name || '').toLowerCase() === String(name || '').toLowerCase() && Engine.dateStr(Engine.parseTs(p.ts) || new Date(0)) === day) hit = p; });
+  return hit;
+}
+
+/* ---- member drawer: this month's check-ins and payments (⋯), delete a mistake / restore (R67) */
+function memberActivity(){
+  var box = $('memAct'), m = S.open && S.open.m; if (!box || !m) return;
+  var ym = S.ym, prev = addMonth(ym, -1);
+  var att = local('attendance').filter(function(a){ return a.code === m.code && (a.plan_month === ym || a.plan_month === prev) && !a._local; }).sort(function(a, b){ return a.class_key < b.class_key ? 1 : -1; });
+  var pays = local('payments').filter(function(p){ return p.code === m.code && (p.month === ym || p.month === prev) && !p._local; }).sort(function(a, b){ return a.ts < b.ts ? 1 : -1; });
+  var h = '<span class="label">Check-ins (last month and this month)</span>' + (att.map(function(a){
+    var it = { kind: 'att', id: a.att_id, code: a.code, guest: false, result: a.result, classKey: a.class_key, name: m.name, row: a };
+    return '<div class="item' + (a.result === 'VOID' ? ' voided' : '') + '"><div class="grow"><b>' + esc(classLabel(a.class_key)) + '</b><br><small>' + esc(a.via || '') + '</small> ' + ptag(a) + '</div>' + pillHtml(a.result) + pmore(it) + pslot(it) + '</div>';
+  }).join('') || '<p class="muted">None.</p>');
+  h += '<span class="label" style="display:block;margin-top:12px">Payments</span>' + (pays.map(function(p){
+    var it = { kind: 'pay', id: p.pay_id, code: p.code, guest: false, void: !!p.void, name: m.name, row: p };
+    return '<div class="item' + (p.void ? ' voided' : '') + '"><div class="grow"><b>' + esc(KIND[p.kind] || p.kind) + ' · ' + esc(monthLabel(p.month)) + '</b><br><small class="vx">' + rm(p.amount) + ' · ' + esc(p.method) + ' · ' + esc(p.received_by) + '</small> ' + ptag(p) + '</div>' + pmore(it) + pslot(it) + '</div>';
+  }).join('') || '<p class="muted">None.</p>');
+  box.innerHTML = h;
+}
+ACT.memDelAsk = function(b){
+  $('memDel').innerHTML = '<div class="emenu">' + FDAEdit.reasonBox('mdWhy', 'Why delete this member? Only for a member added by mistake (no payments, no check-ins after the join day).') + '<div class="eerr" id="mdErr"></div><div class="ebtns"><button class="btn del" type="button" data-act="memDelGo">Delete member</button><button class="btn sec" type="button" data-act="memDelNo">Keep</button></div></div>';
+};
+ACT.memDelNo = function(){ drawMemDel(); };
+ACT.memDelGo = function(){
+  var why = val('mdWhy').trim(); if (!why) { $('mdErr').textContent = 'Please type why.'; return; }
+  var code = S.open.code;
+  run(W('partners_change', { type: 'member', action: 'delete', id: code, reason: why, requestId: rid() })).then(function(r){
+    if (!r) return; if (S.store) S.store.putRows(r);
+    drawerClose(); S.mem.list = null; if (S.tab === 'members') loadMembers();
+    FDAEdit.undoToast('Member deleted', function(){ run(W('partners_change', { type: 'member', action: 'restore', id: code, requestId: rid() }), 'Undone ✓').then(function(x){ if (x) { if (S.store) S.store.putRows(x); S.mem.list = null; if (S.tab === 'members') loadMembers(); } }); });
+  });
+};
+ACT.memRestore = function(){
+  var code = S.open.code;
+  run(W('partners_change', { type: 'member', action: 'restore', id: code, requestId: rid() }), 'Member restored').then(function(r){ if (r) { if (S.store) S.store.putRows(r); drawerClose(); S.mem.list = null; if (S.tab === 'members') loadMembers(); } });
+};
+function drawMemDel(){
+  var m = S.open && S.open.m, el = $('memDel'); if (!el || !m) return;
+  el.innerHTML = m.status === 'Deleted' ? '<div class="warn">This member was deleted' + (m.edited_by ? ' by ' + esc(m.edited_by) : '') + '. <button class="btn sm" type="button" data-act="memRestore">Restore</button></div>'
+    : '<button class="btn ghost sm" type="button" data-act="memDelAsk">Delete member (added by mistake)</button>';
+}
+
+/* ---- R69: Check data -> "Different people" for a same-name group */
+function dupGroupsHtml(h){
+  var g = (h && h.duplicateGroups) || []; if (!g.length) return '';
+  return '<div class="card" style="margin-top:10px"><h3>Same name</h3><p class="sub">Are these the same person? If not, tap Different people and they are not listed again.</p>' + g.map(function(x, i){
+    return '<div class="item"><div class="grow"><b>' + esc(x.name) + '</b><br><small>' + x.codes.map(esc).join(' · ') + '</small></div><button class="btn secondary sm" type="button" data-act="dupOk" data-v="' + i + '">Different people</button></div>'; }).join('') + '</div>';
+}
+ACT.dupOk = function(b, v){
+  var g = ((S.health || {}).duplicateGroups || [])[+v]; if (!g) return;
+  b.disabled = true;
+  run(W('partners_dismissDuplicates', g.codes), 'Marked as different people').then(function(r){ if (!r) { b.disabled = false; return; } S.health.duplicateGroups.splice(+v, 1); var item = b.closest('.item'); if (item) item.remove(); });
+};
 </script>
 
 <script>if ($('hdr')) $('hdr').classList.add('wide'); S.tab = lsGet('fda_ptab') || 'today'; boot();</script>

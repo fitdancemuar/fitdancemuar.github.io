@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>FIT Dance</title>
+<meta name="theme-color" content="#0b0a0f">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black">
+<meta name="apple-mobile-web-app-title" content="FIT Dance">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icons/icon-180.png">
+<link rel="icon" type="image/png" sizes="32x32" href="icons/icon-32.png">
+<style>
+html,body{margin:0;height:100%;background:#0b0a0f;color:#f6f6f6;font:16px system-ui,sans-serif}
+iframe{position:fixed;inset:0;width:100%;height:100%;border:0;padding-top:env(safe-area-inset-top);box-sizing:border-box;background:#0b0a0f}
+#none{padding:40px 24px;text-align:center} #none img{width:96px;border-radius:16px}
+</style></head><body>
+<iframe id="frame" title="FIT Dance Academy" allow="clipboard-write"></iframe>
+<div id="none" hidden><img src="icons/icon-192.png" alt="FIT Dance Academy"><p>Please open your personal FIT Dance link from WhatsApp once.<br>请先从 WhatsApp 打开你的专属链接一次。</p></div>
+<script>var DOOR="https://script.google.com/macros/s/AKfycbxDQG-e_sMUr8fYg9NZgUc13STtl1pJ01DpWMI0AWWAHq4i9cCa40Vwm1RhOaPstGzr/exec",frame=document.getElementById('frame');
+var p=new URLSearchParams(location.search),t=p.get('m');
+try{ if(t&&/^[A-Za-z0-9]{8,40}$/.test(t)) localStorage.setItem('fda_token',t); else t=localStorage.getItem('fda_token'); }catch(e){}
+if(t&&/^[A-Za-z0-9]{8,40}$/.test(t)){ frame.src=DOOR+'?m='+encodeURIComponent(t); if(p.get('m')) history.replaceState(null,'',location.pathname); }
+else { frame.remove(); document.getElementById('none').hidden=false; }</script>
+</body></html>

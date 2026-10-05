@@ -635,6 +635,71 @@ var Engine = (function () {
     return res;
   }
 
+  // ---------- R70 / R71: pay in advance + promotions ----------
+  var ADV_MAX_MONTHS = 12;
+  /** 'YYYY-MM' plus n months (n may be negative). */
+  function addMonths(ym, n) {
+    var y = +String(ym).slice(0, 4), m = +String(ym).slice(5, 7) - 1 + (Number(n) || 0);
+    y += Math.floor(m / 12); m = ((m % 12) + 12) % 12;
+    return y + '-' + pad(m + 1);
+  }
+  /** Split a sen total over n months: equal shares, the remainder sen on the FIRST month (RM100 / 3 = 33.34 + 33.33 + 33.33). */
+  function splitSen(totalSen, n) {
+    var base = Math.floor(totalSen / n), out = [];
+    for (var i = 0; i < n; i++) out.push(base);
+    out[0] += totalSen - base * n;
+    return out;
+  }
+  /** Short month label: 'Oct 2026'. */
+  function monthShort(ym) {
+    var names = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    return names[+String(ym).slice(5, 7) - 1] + ' ' + String(ym).slice(0, 4);
+  }
+  /**
+   * R70 / R71: the per-month rows of an advance payment (pure; the server re-runs it and never trusts the page).
+   * a = {member, plan 'STD'|'UNL', months 1-12, start 'YYYY-MM', settings, promo?: {name, plan, months, total_price, birthday_combines}}
+   * Without a promo each month costs its normal price (a birthday month gets its discount automatically, birthday TRUE).
+   * With a promo: amount per month = total / months (remainder sen on the first month); a birthday month gets 10% off its share only
+   * when birthday_combines; rebate = the month's normal price - amount (>= 0) so coverage counts the full plan (R58 rule).
+   * -> {error} | {plan, months:[ym], lines:[{month, amount, rebate, value, birthday, list}], total, value, discount, listTotal}
+   *    amount = money collected; value = amount + rebate (what coverage counts); list = the month's normal price for this member.
+   */
+  function advancePlan(a) {
+    a = a || {};
+    var promo = a.promo || null, settings = a.settings, c = cfg(settings);
+    var plan = promo ? String(promo.plan) : String(a.plan || '');
+    var n = promo ? Number(promo.months) : Number(a.months);
+    if (plan === 'PER') return { error: 'Per class can’t be paid in advance. Choose Standard or Unlimited.' };
+    if (plan !== 'STD' && plan !== 'UNL') return { error: 'Choose Standard or Unlimited.' };
+    if (!isFinite(n) || Math.floor(n) !== n || n < 1 || n > ADV_MAX_MONTHS) return { error: 'Choose 1 to ' + ADV_MAX_MONTHS + ' months.' };
+    if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(String(a.start || ''))) return { error: 'Choose the first month.' };
+    var shares = null, combine = false;
+    if (promo) {
+      var tot = toSen(promo.total_price);
+      if (!(tot > 0)) return { error: 'This promotion has no price.' };
+      shares = splitSen(tot, n);
+      combine = isTrue(promo.birthday_combines);
+    }
+    var out = { plan: plan, months: [], lines: [], total: 0, value: 0, discount: 0, listTotal: 0 };
+    var totSen = 0, valSen = 0, listSen = 0;
+    for (var i = 0; i < n; i++) {
+      var ym = addMonths(a.start, i), bday = isBirthdayMonth(a.member, ym);
+      var list = priceSen(plan, bday, settings), amount, normal, bdayApplied;
+      if (!promo) { amount = list; normal = list; bdayApplied = bday; }
+      else {
+        bdayApplied = bday && combine;
+        amount = bdayApplied ? Math.round(shares[i] * (1 - c.disc)) : shares[i];
+        normal = priceSen(plan, bdayApplied, settings); // not combining: the promo share stands in for the full price
+      }
+      var rebate = Math.max(0, normal - amount);
+      out.months.push(ym);
+      out.lines.push({ month: ym, amount: fromSen(amount), rebate: fromSen(rebate), value: fromSen(amount + rebate), birthday: bdayApplied, list: fromSen(list) });
+      totSen += amount; valSen += amount + rebate; listSen += list;
+    }
+    out.total = fromSen(totSen); out.value = fromSen(valSen); out.listTotal = fromSen(listSen); out.discount = fromSen(Math.max(0, listSen - totSen));
+    return out;
+  }
+
   // ---------- month close ----------
   function monthClose(a) {
     var holders = (a.holders || []).slice();
@@ -794,6 +859,7 @@ var Engine = (function () {
     classAt: classAt, nextClass: nextClass, classDates: classDates, sessions: sessions, sessionsAround: sessionsAround, staffClass: staffClass,
     planMonth: planMonth, shownResult: shownResult, monthRange: monthRange, sessionStartMs: startMs, sessionEndMs: endMs, weekStart: weekStart, weekIndex: weekIndex, addDays: addDays, classStart: classStart,
     checkIn: checkIn, paymentOptions: paymentOptions, isImported: isImported,
+    ADV_MAX_MONTHS: ADV_MAX_MONTHS, addMonths: addMonths, splitSen: splitSen, monthShort: monthShort, advancePlan: advancePlan,
     monthClose: monthClose,
     parseFormOption: parseFormOption, birthdayFromIC: birthdayFromIC, parseDob: parseDob,
     normName: normName, healthNote: healthNote, mapRegistrationHeaders: mapRegistrationHeaders,
@@ -822,7 +888,7 @@ if (typeof module !== 'undefined') module.exports = Engine;
  *
  *   st.get('members')        -> {code: row}           (also 'attendance' {att_id: row}, 'payments' {pay_id: row},
  *   st.list('attendance')    -> [rows]                  'coverage' {code|month: row}, 'carry' {code|month: row})
- *   st.get('sessions')       -> [rows]   st.get('settings') -> {...}
+ *   st.get('sessions')       -> [rows]   st.get('settings') -> {...}   st.get('promos') -> [promotions on sale] (R71)
  *   st.meta(key[, value])    -> small page values kept with the data (last screen payloads, labels …)
  *   st.put(coll, id, row) / st.remove(coll, id)   -> local edits (optimistic rows), saved and 'change' emitted
  *   st.sync()                -> Promise; pulls what changed since the last sync (full when none), merges by id
@@ -954,7 +1020,7 @@ if (typeof module !== 'undefined') module.exports = Engine;
     var syncing = null;
     var store;
 
-    function blank() { return { since: null, members: {}, attendance: {}, payments: {}, coverage: {}, carry: {}, sessions: [], settings: {}, meta: {}, owner: '', syncedAt: 0 }; }
+    function blank() { return { since: null, members: {}, attendance: {}, payments: {}, coverage: {}, carry: {}, sessions: [], settings: {}, promos: [], meta: {}, owner: '', syncedAt: 0 }; }
     function emit(ev, x) { (listeners[ev] || []).slice().forEach(function (f) { try { f(x, store); } catch (e) { if (root.console) root.console.error(e); } }); }
     function all() { return outbox.concat(memOnly); }
     function isPending(id) { return all().some(function (x) { return x.id === id; }); }
@@ -994,6 +1060,7 @@ if (typeof module !== 'undefined') module.exports = Engine;
       (p.carry || []).forEach(function (r) { data.carry[r.code + '|' + r.month] = r; });
       if (p.sessions && p.sessions.length) data.sessions = p.sessions;
       if (p.settings) data.settings = p.settings;
+      if (p.promos) data.promos = p.promos; // R71: promotions on sale (the whole list, when they changed)
       if (p.months && p.months.length) { // keep only the months the server still sends (last + this)
         var ok = {}; p.months.forEach(function (m) { ok[m] = true; });
         Object.keys(data.attendance).forEach(function (id) { var r = data.attendance[id]; if (!r._local && r.plan_month && !ok[r.plan_month] && !ok[String(r.class_key).slice(0, 7)]) delete data.attendance[id]; });
@@ -1144,7 +1211,7 @@ if (typeof module !== 'undefined') module.exports = Engine;
       get: function (c) { return data[c]; },
       list: function (c) { var m = data[c] || {}; return Array.isArray(m) ? m.slice() : Object.keys(m).map(function (k) { return m[k]; }); },
       meta: function (k, v) { if (arguments.length > 1) { data.meta[k] = v; saveData(); return v; } return data.meta[k]; },
-      put: function (c, id, row) { if (c === 'sessions' || c === 'settings') data[c] = row; else data[c][id] = row; changed({ put: c }); return row; },
+      put: function (c, id, row) { if (c === 'sessions' || c === 'settings' || c === 'promos') data[c] = row; else data[c][id] = row; changed({ put: c }); return row; },
       remove: function (c, id) { delete data[c][id]; changed({ remove: c }); },
       since: function () { return data.since; },
       syncedAt: function () { return data.syncedAt; },
@@ -1217,10 +1284,17 @@ if (typeof module !== 'undefined') module.exports = Engine;
 .voided{opacity:.62}
 .etag{display:inline-block;font-size:11px;font-weight:700;letter-spacing:.04em;border-radius:999px;padding:1px 8px;border:1px solid var(--muted);color:var(--muted);white-space:normal;margin-top:3px}
 .etag.del{border-color:var(--pink);color:var(--pink)}
-.utoast{position:fixed;left:12px;right:12px;bottom:16px;max-width:480px;margin:0 auto;display:flex;align-items:center;gap:12px;background:var(--surface);border:1px solid var(--green);color:var(--ink);border-radius:14px;padding:8px 8px 8px 16px;z-index:90;box-shadow:none}
-.utoast span{flex:1;font-weight:700;min-width:0}
+.tstack{position:fixed;left:12px;right:12px;bottom:16px;max-width:480px;margin:0 auto;display:flex;flex-direction:column;gap:8px;z-index:90;pointer-events:none}
+.tstack:empty{display:none}
+.utoast{pointer-events:auto;display:flex;flex-wrap:wrap;align-items:center;gap:8px 12px;background:var(--surface);border:1px solid var(--green);color:var(--ink);border-radius:14px;padding:8px 8px 8px 16px;box-shadow:none;min-width:0}
+.utoast span{flex:1 1 160px;font-weight:700;min-width:0;overflow-wrap:anywhere}
 .utoast .btn{min-height:48px;padding:0 18px;background:var(--green);color:var(--dark)}
 .utoast.err{border-color:var(--pink)}
+.utoast.note{background:var(--green);color:var(--dark);border-color:var(--green);padding:12px 16px;text-align:center}
+.utoast.note.err{background:var(--pink);color:#fff;border-color:var(--pink)}
+.utoast.confirm span{flex:1 1 100%}
+.utoast.confirm .btn{flex:1 1 auto}
+.utoast.confirm .btn.no{background:var(--surface-2);color:var(--ink)}
 </style>
 <script>
 /* FDAEdit (R67): helpers shared by Peggy's console and the partners console. Plain ES5. */
@@ -1236,20 +1310,82 @@ if (typeof module !== 'undefined') module.exports = Engine;
     return '';
   }
   function isGone(o) { return !!o && (o.void === true || o.voided === true || o.result === 'VOID'); }
-  var timer = null, el = null;
-  /** "Saved · Undo" for 10 s (R67). undo: function or null (then only the message). */
-  function undoToast(msg, undo, err) {
-    if (!root.document) return;
-    if (!el) { el = root.document.createElement('div'); el.setAttribute('role', 'status'); el.setAttribute('aria-live', 'polite'); root.document.body.appendChild(el); }
-    clearTimeout(timer);
-    el.className = 'utoast' + (err ? ' err' : '');
-    el.innerHTML = '<span>' + esc(msg) + '</span>' + (undo ? '<button type="button" class="btn">Undo</button>' : '');
-    el.style.display = 'flex';
-    var b = el.querySelector('button');
-    if (b) b.onclick = function () { hide(); try { undo(); } catch (e) { if (root.console) root.console.error(e); } };
-    timer = setTimeout(hide, undo ? 10000 : 3000);
+  // ---- R72: ONE toast stack at the bottom for both consoles. "Saved · Undo" (10 s), plain messages / warnings (console toast())
+  //      and the "Delete anyway?" bar are separate items stacked above each other: nothing overlaps, and a later toast never
+  //      swallows an Undo that is still inside its 10 s. At most 3 plain messages at once (the oldest message goes first; an
+  //      Undo is never pushed out early). The page gets bottom padding while toasts show, so the last row stays reachable.
+  var stack = null, items = [], MAX_NOTES = 3;
+  function doc() { return root.document || null; }
+  function box() {
+    var d = doc();
+    if (!stack) {
+      stack = d.createElement('div'); stack.className = 'tstack'; stack.setAttribute('role', 'status'); stack.setAttribute('aria-live', 'polite');
+      d.body.appendChild(stack);
+    }
+    return stack;
   }
-  function hide() { clearTimeout(timer); if (el) el.style.display = 'none'; }
+  function pad() {
+    var d = doc(); if (!d || !d.body || !stack) return;
+    d.body.style.paddingBottom = items.length ? ((stack.offsetHeight || items.length * 64) + 24) + 'px' : '';
+  }
+  function drop(it) {
+    if (!it) return;
+    clearTimeout(it.timer);
+    var i = items.indexOf(it); if (i >= 0) items.splice(i, 1);
+    if (it.node && it.node.parentNode) it.node.parentNode.removeChild(it.node);
+    pad();
+  }
+  function btn(label, extraClass, onClick) {
+    var b = doc().createElement('button'); b.type = 'button'; b.className = 'btn' + (extraClass ? ' ' + extraClass : ''); b.textContent = label;
+    b.onclick = onClick; return b;
+  }
+  function add(kind, msg, cls, ms) {
+    var d = doc(), node = d.createElement('div'), span = d.createElement('span');
+    node.className = 'utoast' + (cls ? ' ' + cls : ''); span.textContent = String(msg == null ? '' : msg); node.appendChild(span);
+    // Undo / confirm toasts sit at the bottom of the stack, messages above them: a message timing out never moves an Undo
+    // button out from under the finger (found in the 390 px check: the Undo jumped down when the receipt message expired)
+    node.style.order = kind === 'note' ? '0' : '1';
+    var it = { kind: kind, node: node, msg: String(msg) };
+    box().appendChild(node); items.push(it);
+    it.timer = setTimeout(function () { drop(it); }, ms);
+    var notes = items.filter(function (x) { return x.kind === 'note'; });
+    while (notes.length > MAX_NOTES) drop(notes.shift());
+    return it;
+  }
+  /** "Saved · Undo" for 10 s (R67). undo: function or null (then only the message, 3 s). Returns the toast (for hideToast). */
+  function undoToast(msg, undo, err) {
+    if (!doc()) return null;
+    var it = add(undo ? 'undo' : 'note', msg, (err ? 'err' : '') + (undo ? '' : ' note'), undo ? 10000 : 3000);
+    if (undo) it.node.appendChild(btn('Undo', '', function () { drop(it); try { undo(); } catch (e) { if (root.console) root.console.error(e); } }));
+    pad();
+    return it;
+  }
+  /** a plain message / warning (the consoles' toast()): err = pink, shown 5 s; same text again restarts it instead of piling up */
+  function note(msg, err) {
+    if (!doc()) return null;
+    var last = items.filter(function (x) { return x.kind === 'note'; }).pop();
+    if (last && last.msg === String(msg)) drop(last);
+    var it = add('note', msg, 'note' + (err ? ' err' : ''), err ? 5000 : 2800);
+    pad();
+    return it;
+  }
+  /** hide one toast (default: the newest "Saved · Undo", e.g. that write failed); other toasts stay */
+  function hide(it) {
+    if (it && it.node) return drop(it);
+    var u = items.filter(function (x) { return x.kind === 'undo'; }).pop();
+    drop(u);
+  }
+  /** R70: an in-page "are you sure?" bar (a used month of a payment in advance): yesLabel runs onYes; Cancel closes (30 s). */
+  function confirmBar(msg, yesLabel, onYes) {
+    if (!doc()) return null;
+    var it = add('confirm', msg, 'err confirm', 30000);
+    it.node.appendChild(btn(yesLabel || 'Yes', 'yes', function () { drop(it); try { onYes(); } catch (e) { if (root.console) root.console.error(e); } }));
+    it.node.appendChild(btn('Cancel', 'no', function () { drop(it); }));
+    pad();
+    return it;
+  }
+  /** the toasts on screen (tests) */
+  function toasts() { return items.map(function (x) { return { kind: x.kind, msg: x.msg }; }); }
   /** The in-page "why?" box for a delete (never window.confirm). */
   function reasonBox(id, label) {
     return '<label for="' + id + '">' + esc(label || 'Why delete it? (shown on the list)') + '</label><input id="' + id + '" maxlength="200" autocomplete="off" placeholder="e.g. wrong member">';
@@ -1263,7 +1399,105 @@ if (typeof module !== 'undefined') module.exports = Engine;
     d.setUTCDate(d.getUTCDate() - wd - 7);
     return d.toISOString().slice(0, 10);
   }
-  root.FDAEdit = { tag: tag, isGone: isGone, undoToast: undoToast, hideToast: hide, reasonBox: reasonBox, failed: failed, peggyFrom: peggyFrom, esc: esc };
+  // ---- R72: a month of a payment in advance (bundle) is never edited on its own: "Edit whole bundle" (method / received by) or
+  //      "Delete" (every month from this month on). These build the optimistic rows for the phone's copy; the server decides.
+  /** the bundle id of a payment row ('' = a normal payment) */
+  function bundleOf(row) { return String((row && row.bundle_id) || ''); }
+  /** list = the phone's payment rows; action 'delete' | 'restore' | 'edit'; ym = this month; set = {method, received_by} (edit);
+      stampFn(row, extra) -> stamped copy. -> [{coll:'payments', id, row}] */
+  function bundlePatches(list, bid, action, ym, set, stampFn) {
+    var out = [];
+    (list || []).forEach(function (r) {
+      if (!bid || bundleOf(r) !== bid) return;
+      var gone = r.void === true;
+      if (action === 'delete' && !gone && String(r.month) >= ym) out.push({ coll: 'payments', id: r.pay_id, row: stampFn(r, { void: true, void_reason: 'Bundle deleted: ' + (set && set.why || '') }) });
+      if (action === 'restore' && gone && /^Bundle deleted: /.test(String(r.void_reason || ''))) out.push({ coll: 'payments', id: r.pay_id, row: stampFn(r, { void: false, void_reason: '' }) });
+      if (action === 'edit' && !gone) out.push({ coll: 'payments', id: r.pay_id, row: stampFn(r, { method: set.method, received_by: set.received_by }) });
+    });
+    return out;
+  }
+  /** "Oct, Nov, Dec 2026" of the bundle's months on this phone (live rows; all rows when every month is deleted) */
+  function bundleMonths(list, bid) {
+    var rows = (list || []).filter(function (r) { return bid && bundleOf(r) === bid; }), live = rows.filter(function (r) { return r.void !== true; });
+    var ms = (live.length ? live : rows).map(function (r) { return String(r.month); }).sort();
+    var n = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    return ms.map(function (ym, i) { var nx = ms[i + 1]; return n[+ym.slice(5, 7) - 1] + (!nx || nx.slice(0, 4) !== ym.slice(0, 4) ? ' ' + ym.slice(0, 4) : ''); }).join(', ');
+  }
+  root.FDAEdit = { tag: tag, isGone: isGone, undoToast: undoToast, confirmBar: confirmBar, hideToast: hide, note: note, toasts: toasts, reasonBox: reasonBox, failed: failed, peggyFrom: peggyFrom, esc: esc,
+    bundleOf: bundleOf, bundlePatches: bundlePatches, bundleMonths: bundleMonths };
+})(typeof window !== 'undefined' ? window : globalThis);
+</script>
+
+<style>
+/* R70 / R71: pay in advance + promotions (shared by Peggy's Pay and the partners' Record payment) */
+.adv-bd{width:100%;border-collapse:collapse;margin:8px 0 4px;font-size:15px}
+.adv-bd td{padding:6px 4px;border-bottom:1px solid var(--line);vertical-align:top}
+.adv-bd td.n{text-align:right;white-space:nowrap;font-variant-numeric:tabular-nums}
+.adv-bd tr.tot td{border-bottom:0;border-top:2px solid var(--ink);font-weight:800;font-size:17px}
+.adv-bd tr.disc td{color:var(--yellow)}
+.adv-bd small{color:var(--muted)}
+.adv-warn{background:var(--surface-2);border:1px solid var(--pink);border-radius:12px;padding:10px 12px;margin:8px 0;color:var(--ink);font-size:14px}
+.adv-row{display:grid;grid-template-columns:1fr 1fr;gap:8px}.adv-row>div{min-width:0}
+.adv-row select{width:100%;box-sizing:border-box}
+</style>
+<script>
+/* FDAAdv (R70 / R71): the price breakdown of a payment in advance, computed on the phone with the shared Engine (the server
+   re-checks every number and refuses a month already paid). Plain ES5. */
+(function (root) {
+  function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); }
+  var MON = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+  function monthLabel(ym) { return MON[+String(ym).slice(5, 7) - 1] + ' ' + String(ym).slice(0, 4); }
+  function today() { return root.Engine.dateStr(new Date()); }
+  /** promotions on sale today (the list from the server / sync; sell dates re-checked on the phone) */
+  function onSale(list) {
+    var t = today();
+    return (list || []).filter(function (p) { return p && p.active !== false && (!p.sellFrom || t >= p.sellFrom) && (!p.sellTo || t <= p.sellTo); });
+  }
+  /** first months a promo (or a plain advance payment: promo null) may start, from this month ym */
+  function starts(promo, ym) {
+    var E = root.Engine;
+    if (promo && promo.firstMonthRule === 'this month') return [ym];
+    if (promo && promo.firstMonthRule === 'next month') return [E.addMonths(ym, 1)];
+    var out = []; for (var i = 0; i < 12; i++) out.push(E.addMonths(ym, i)); return out;
+  }
+  /** Engine.advancePlan for a page: a = {member:{code, bday_month}, plan, months, start, promo (page shape) | null, settings (Engine keys)} */
+  function quote(a) {
+    var p = a.promo ? { name: a.promo.name, plan: a.promo.plan, months: a.promo.months, total_price: a.promo.total, birthday_combines: a.promo.birthdayCombines } : null;
+    return root.Engine.advancePlan({ member: a.member, plan: a.plan, months: Number(a.months), start: a.start, settings: a.settings, promo: p });
+  }
+  /** months of the quote that already have a payment (paidMonths: ['YYYY-MM']) */
+  function clashes(q, paidMonths) {
+    var have = {}; (paidMonths || []).forEach(function (m) { have[m] = true; });
+    return ((q && q.months) || []).filter(function (m) { return have[m]; });
+  }
+  /** the price breakdown table: one line per month, the promotion discount, the total */
+  function breakdown(q, promo, paidMonths) {
+    var E = root.Engine;
+    if (!q || q.error) return '<div class="adv-warn">' + esc((q && q.error) || 'Choose a plan and months.') + '</div>';
+    var plan = q.plan === 'UNL' ? 'Unlimited' : 'Standard', h = '<table class="adv-bd">', clash = clashes(q, paidMonths);
+    q.lines.forEach(function (l) {
+      var price = promo ? l.value : l.amount;
+      h += '<tr><td>' + esc(monthLabel(l.month)) + ' <small>' + plan + (l.birthday ? ' · 🎂 10% off' : '') + (clash.indexOf(l.month) >= 0 ? ' · <b style="color:var(--pink)">already paid</b>' : '') + '</small></td><td class="n">' + E.fmtRM(price) + '</td></tr>';
+    });
+    var disc = 0; q.lines.forEach(function (l) { disc += E.toSen(l.rebate); });
+    if (promo && disc) h += '<tr class="disc"><td>Promo: ' + esc(promo.name) + '</td><td class="n">−' + E.fmtRM(E.fromSen(disc)) + '</td></tr>';
+    h += '<tr class="tot"><td>Total · ' + q.lines.length + ' month' + (q.lines.length === 1 ? '' : 's') + '</td><td class="n">' + E.fmtRM(q.total) + '</td></tr></table>';
+    if (clash.length) h += '<div class="adv-warn">Already paid: ' + esc(clash.map(monthLabel).join(', ')) + '. Choose a later first month or fewer months.</div>';
+    return h;
+  }
+  /** "Oct, Nov, Dec 2026" */
+  function monthsShort(months) {
+    var n = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    return (months || []).map(function (ym, i) { var nx = months[i + 1]; return n[+ym.slice(5, 7) - 1] + (!nx || nx.slice(0, 4) !== ym.slice(0, 4) ? ' ' + ym.slice(0, 4) : ''); }).join(', ');
+  }
+  /** optimistic local rows of a bundle (replaced by the server's rows at the next sync) */
+  function localRows(q, code, method, by, promo, id, ts) {
+    return q.lines.map(function (l, i) {
+      return { pay_id: 'L-' + id + '-' + i, _local: id, code: code, month: l.month, kind: q.plan, amount: l.amount, rebate: l.rebate, method: method, received_by: by,
+        void: false, ts: ts, bundle_id: 'B' + id, promo_id: promo ? promo.promoId : '' };
+    });
+  }
+  root.FDAAdv = { onSale: onSale, starts: starts, quote: quote, clashes: clashes, breakdown: breakdown, monthLabel: monthLabel, monthsShort: monthsShort, localRows: localRows };
 })(typeof window !== 'undefined' ? window : globalThis);
 </script>
 
@@ -1285,7 +1519,7 @@ function $(id){return document.getElementById(id);}
 function esc(s){return String(s==null?'':s).replace(/[&<>"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];});}
 function lsSet(k,v){try{if(v==null)localStorage.removeItem(k);else localStorage.setItem(k,v);}catch(e){}}
 function lsGet(k){try{return localStorage.getItem(k)||'';}catch(e){return '';}}
-function toast(msg,err){var t=$('toast');t.textContent=msg;t.className='toast'+(err?' err':'');clearTimeout(toast.t);toast.t=setTimeout(function(){t.className='toast hidden';},err?4500:2500);}
+function toast(msg,err){if(window.FDAEdit&&FDAEdit.note&&document.body){FDAEdit.note(msg,err);return;} /* R72: one toast stack (never over Undo) */ var t=$('toast');t.textContent=msg;t.className='toast'+(err?' err':'');clearTimeout(toast.t);toast.t=setTimeout(function(){t.className='toast hidden';},err?4500:2500);}
 function rm(n){return Engine.fmtRM(n||0);}
 function now(){return new Date();}
 function ymNow(){return Engine.ymOf(now());}
@@ -1589,7 +1823,7 @@ function startPay(code){ S.pay=null;S.saved=null;S.receipt=null; tab='pay'; draw
 function pickPay(code){
   var m=member(code); if(!m){toast('Member not found on this phone yet',true);return;}
   var meth=methods()[0]||'Cash';
-  S.pay={code:code,month:ymNow(),kind:'',method:meth,by:defaultHolder(meth),rebate:'',reason:'',ctx:null};
+  S.pay={code:code,month:ymNow(),kind:'',method:meth,by:defaultHolder(meth),rebate:'',reason:'',ctx:null,mode:'now',adv:{promoId:'',plan:'STD',months:3,start:''}};
   viewPay(); loadPayCtx();
 }
 function loadPayCtx(){ var p=S.pay; if(!p)return; var code=p.code, month=p.month;
@@ -1619,6 +1853,9 @@ function viewPay(){
   var paid=memberPays(p.code,p.month).reduce(function(a,x){return a+Number(x.amount)+Number(x.rebate||0);},0);
   var bday=Engine.isBirthdayMonth({bday_month:m.bday_month},p.month);
   h+='<div class="card"><span class="label">'+esc(p.code)+'</span><h2 style="margin:4px 0 6px">'+esc(m.name)+'</h2><div class="muted" id="payInfo">'+esc(monthLabel(p.month))+': paid <b style="color:var(--ink)">'+rm(paid)+'</b> · classes <b style="color:var(--ink)">'+visits(p.code,p.month)+'</b></div>'+(bday?'<div class="banner" style="margin:10px 0 0">🎂 Birthday month prices</div>':'')+'</div>';
+  /* R70 / R71: this month (as before) or months ahead / a promotion */
+  h+='<div class="seg" id="pmode" role="group" aria-label="Payment type"><button type="button" data-mode="now" class="'+(p.mode!=='adv'?'on':'')+'">This month</button><button type="button" data-mode="adv" class="'+(p.mode==='adv'?'on':'')+'">Months ahead · promos</button></div>';
+  if(p.mode==='adv') return viewPayAdv(h);
   h+='<span class="label">For month</span><div class="seg" id="pmon"><button type="button" data-mon="'+ym+'" class="'+(p.month===ym?'on':'')+'">'+esc(monthLabel(ym))+'</button><button type="button" data-mon="'+py+'" class="'+(p.month===py?'on':'')+'">'+esc(monthLabel(py))+'</button></div>';
   h+='<span class="label" style="display:block;margin-top:14px">What is being paid</span><div id="opts"></div>';
   h+='<span class="label" style="display:block;margin-top:14px">Method</span><div class="seg" id="meth">'+methods().map(function(x){return '<button type="button" data-m="'+esc(x)+'" class="'+(x===p.method?'on':'')+'">'+esc(x==='Bank transfer'?'Bank':x)+'</button>';}).join('')+'</div>';
@@ -1628,6 +1865,7 @@ function viewPay(){
   h+='<button class="btn good block" id="paySave" style="min-height:56px;font-size:18px">Save payment</button><button class="btn secondary block" id="payBack" style="margin-top:10px">Change member</button>';
   v.innerHTML=h;
   paintPayForm();
+  payModeClick();
   $('pmon').onclick=function(e){var b=e.target.closest('[data-mon]');if(b){p.month=b.getAttribute('data-mon');p.kind='';p.ctx=null;viewPay();loadPayCtx();}};
   $('meth').onclick=function(e){var b=e.target.closest('[data-m]');if(!b)return;p.method=b.getAttribute('data-m');p.by=defaultHolder(p.method);
     var a=$('meth').children;for(var i=0;i<a.length;i++)a[i].className=a[i]===b?'on':''; $('by').innerHTML=holderOpts(p.by);};
@@ -1636,6 +1874,62 @@ function viewPay(){
   $('rebWhy').oninput=function(){p.reason=this.value;$('payErr').innerHTML='';};
   $('payBack').onclick=function(){S.pay=null;viewPay();};
   $('paySave').onclick=savePay;
+}
+function payModeClick(){ var p=S.pay; $('pmode').onclick=function(e){var b=e.target.closest('[data-mode]');if(!b)return;p.mode=b.getAttribute('data-mode');
+  if(p.mode==='adv'&&p.month!==ymNow()){p.month=ymNow();p.ctx=null;loadPayCtx();} viewPay();}; }
+/* ---- R70 / R71: months ahead + promotions (the breakdown is computed here with Engine; the server re-checks everything) */
+function advCtx(){ var p=S.pay; return p.ctx&&p.ctx.ok&&p.ctx.advance?p.ctx.advance:null; }
+function advPromos(){ var a=advCtx(); return FDAAdv.onSale(a?a.promos:(st.get('promos')||[])); }
+function advPromo(){ var id=S.pay.adv.promoId,o=null; advPromos().forEach(function(x){if(x.promoId===id)o=x;}); return o; }
+function advPaid(){ var a=advCtx(), ym=ymNow(); if(a)return a.paidMonths||[];
+  var o={}; pays().forEach(function(x){if(x.code===S.pay.code&&!x.void&&x.month>=ym)o[x.month]=1;}); return Object.keys(o).sort(); }
+function advStarts(){ var pr=advPromo(), ym=ymNow(); return FDAAdv.starts(pr,ym); }
+function advQuote(){ var p=S.pay, a=p.adv, m=member(p.code)||{}, pr=advPromo(), st0=advStarts();
+  if(!a.start||st0.indexOf(a.start)<0){ var paid=advPaid(); a.start=st0.filter(function(x){return paid.indexOf(x)<0;})[0]||st0[0]; }
+  return FDAAdv.quote({member:{code:p.code,bday_month:m.bday_month},plan:pr?pr.plan:a.plan,months:pr?pr.months:a.months,start:a.start,promo:pr,settings:ES()}); }
+function viewPayAdv(h){
+  var v=$('view'), p=S.pay, a=p.adv, promos=advPromos(), pr=advPromo(), paid=advPaid();
+  if(a.promoId&&!pr)a.promoId='';
+  h+='<span class="label" style="display:block;margin-top:14px">Promotion</span><div id="advPromos">'+
+    '<button type="button" class="optcard'+(!pr?' on':'')+'" data-promo="" role="radio" aria-checked="'+(!pr)+'"><span>No promotion · choose plan and months</span><b></b></button>'+
+    promos.map(function(x){var off=x.limitReached;return '<button type="button" class="optcard'+(pr&&pr.promoId===x.promoId?' on':'')+'" data-promo="'+esc(x.promoId)+'" role="radio" aria-checked="'+(!!(pr&&pr.promoId===x.promoId))+'"'+(off?' disabled':'')+'><span>'+esc(x.name)+'<br><small class="muted">'+(x.plan==='UNL'?'Unlimited':'Standard')+' × '+x.months+' month'+(x.months===1?'':'s')+(x.firstMonthRule!=='any'?' · starts '+esc(x.firstMonthRule):'')+(off?' · already bought (limit '+x.maxPerMember+')':'')+'</small></span><b>'+esc(x.totalLabel||rm(x.total))+'</b></button>';}).join('')+
+    (promos.length?'':'<p class="muted" style="margin:6px 0 0;font-size:14px">No promotions on sale right now.</p>')+'</div>';
+  if(!pr){
+    h+='<span class="label" style="display:block;margin-top:14px">Plan</span><div class="seg" id="advPlan"><button type="button" data-plan="STD" class="'+(a.plan==='STD'?'on':'')+'">Standard</button><button type="button" data-plan="UNL" class="'+(a.plan==='UNL'?'on':'')+'">Unlimited</button></div>';
+  }
+  var starts=advStarts(); advQuote();
+  h+='<div class="adv-row" style="margin-top:12px">'+(pr?'':'<div><label for="advMonths" class="label">Months</label><select id="advMonths">'+[1,2,3,4,5,6,7,8,9,10,11,12].map(function(n){return '<option value="'+n+'"'+(n===Number(a.months)?' selected':'')+'>'+n+' month'+(n===1?'':'s')+'</option>';}).join('')+'</select></div>')+
+    '<div><label for="advStart" class="label">First month</label><select id="advStart">'+starts.map(function(ym){return '<option value="'+ym+'"'+(ym===a.start?' selected':'')+'>'+esc(monthLabel(ym))+(paid.indexOf(ym)>=0?' (paid)':'')+'</option>';}).join('')+'</select></div></div>';
+  h+='<div id="advSum"></div>';
+  h+='<span class="label" style="display:block;margin-top:14px">Method</span><div class="seg" id="meth">'+methods().map(function(x){return '<button type="button" data-m="'+esc(x)+'" class="'+(x===p.method?'on':'')+'">'+esc(x==='Bank transfer'?'Bank':x)+'</button>';}).join('')+'</div>';
+  h+='<label for="by" class="label">Received by</label><select id="by">'+holderOpts(p.by)+'</select><div id="payErr"></div>';
+  h+='<button class="btn good block" id="paySave" style="min-height:56px;font-size:18px">Save payment</button><button class="btn secondary block" id="payBack" style="margin-top:10px">Change member</button>';
+  v.innerHTML=h;
+  paintAdvSum(); payModeClick();
+  $('advPromos').onclick=function(e){var b=e.target.closest('[data-promo]');if(!b||b.disabled)return;a.promoId=b.getAttribute('data-promo');a.start='';viewPay();};
+  if($('advPlan'))$('advPlan').onclick=function(e){var b=e.target.closest('[data-plan]');if(b){a.plan=b.getAttribute('data-plan');viewPay();}};
+  if($('advMonths'))$('advMonths').onchange=function(){a.months=Number(this.value);paintAdvSum();};
+  $('advStart').onchange=function(){a.start=this.value;paintAdvSum();};
+  $('meth').onclick=function(e){var b=e.target.closest('[data-m]');if(!b)return;p.method=b.getAttribute('data-m');p.by=defaultHolder(p.method);
+    var x=$('meth').children;for(var i=0;i<x.length;i++)x[i].className=x[i]===b?'on':''; $('by').innerHTML=holderOpts(p.by);};
+  $('by').onchange=function(){p.by=this.value;};
+  $('payBack').onclick=function(){S.pay=null;viewPay();};
+  $('paySave').onclick=savePayAdv;
+}
+function paintAdvSum(){ var el=$('advSum'); if(!el)return; var q=advQuote(), pr=advPromo(), bad=!q||q.error||FDAAdv.clashes(q,advPaid()).length;
+  el.innerHTML=FDAAdv.breakdown(q,pr,advPaid()); var b=$('paySave'); if(b){b.disabled=!!bad; b.textContent=bad?'Save payment':'Save · collect '+rm(q.total);} }
+function savePayAdv(){
+  var p=S.pay, a=p.adv, pr=advPromo(), q=advQuote(), err=function(t){$('payErr').innerHTML='<div class="error">'+esc(t)+'</div>';};
+  if(!q||q.error)return err((q&&q.error)||'Choose a plan and months.');
+  var clash=FDAAdv.clashes(q,advPaid()); if(clash.length)return err('Already paid: '+clash.map(monthLabel).join(', ')+'.');
+  if(pr&&pr.limitReached)return err('Already bought '+pr.name+'.');
+  var m=member(p.code)||{name:p.code};
+  var req={code:p.code,plan:q.plan,months:q.lines.length,start:q.months[0],promoId:pr?pr.promoId:'',total:q.total,method:p.method,receivedBy:p.by};
+  var rid=st.write('door_recordPayment',function(id){req.requestId=id;return [req];},{label:'Payment '+m.name+' '+rm(q.total)+' · '+FDAAdv.monthsShort(q.months),meta:{code:p.code,bundle:true},
+    optimistic:function(s,id){FDAAdv.localRows(q,p.code,p.method,p.by,pr,id,Engine.isoKL(now())).forEach(function(r){s.put('payments',r.pay_id,r);});}});
+  S.saved={rid:rid,name:m.name,code:p.code,amountLabel:rm(q.total),rebateLabel:'',payId:'',error:'',newStatus:'',monthsLabel:FDAAdv.monthsShort(q.months),promoName:pr?pr.name:''};
+  saved(rid,'Payment saved',function(res){return res.payId?{type:'payment',action:'delete',id:res.payId,reason:'Undo',force:true}:null;});
+  S.receipt=null; viewPay();
 }
 function paintPayForm(){
   var p=S.pay, el=$('opts'); if(!el)return;
@@ -1672,6 +1966,7 @@ function viewSaved(){
     v.innerHTML=h; $('payFix').onclick=function(){S.saved=null;viewPay();}; return;
   }
   h+='<div class="card center"><h2>'+(pending?'Saved on this phone':'Saved ✓')+'</h2><p style="font-size:18px;margin:6px 0">'+esc(s.name)+' · '+esc(s.amountLabel)+(s.rebateLabel?' <span class="muted">(rebate '+esc(s.rebateLabel)+')</span>':'')+'</p>'+
+     (s.monthsLabel?'<p class="muted" style="margin:0 0 6px">'+(s.promoName?esc(s.promoName)+' · ':'')+esc(s.monthsLabel)+'</p>':'')+
      (pending?'<p class="muted">'+(st.status().state==='offline'?'No signal — it will send by itself.':'Sending to the studio system…')+'</p>':'')+
      (s.newStatus==='PAID'?'<p>'+pill('PAID')+' for today\'s class</p>':'')+'</div>';
   if(S.receipt&&S.receipt.pdf_url){
@@ -1883,7 +2178,7 @@ function inverse(req,res){
 function change(req,o){
   o=o||{};
   var label=(req.action==='delete'?'Delete ':req.action==='restore'?'Restore ':'Edit ')+(o.what||req.type);
-  var rid=st.write('door_change',function(id){req.requestId=id;return [req];},{label:label,patches:o.patches||null,meta:{type:req.type,action:req.action,id:req.id,undo:!!o.undo}});
+  var rid=st.write('door_change',function(id){req.requestId=id;return [req];},{label:label,patches:o.patches||null,meta:{type:req.type,action:req.action,id:req.id,undo:!!o.undo,req:Object.assign({},req)}});
   EM={key:'',mode:''};
   if(o.undo) toast('Undone ✓');
   else saved(rid,req.action==='delete'?'Deleted':req.action==='restore'?'Restored':'Saved',function(res){ return inverse(req,res); });
@@ -1898,8 +2193,14 @@ function menuHtml(key,it){
   var h='<div class="emenu" role="group" aria-label="Edit or delete">', gone=it.result==='VOID'||it.void;
   if(it.kind==='att'&&!inWindow(String(it.classKey).slice(0,10))) return h+'<p class="ehint">Older than last week. Please ask a partner.</p></div>';
   if(it.kind==='pay'&&!inWindow(tsDate(it.row&&it.row.ts))) return h+'<p class="ehint">Older than last week. Please ask a partner.</p></div>';
-  if(gone){ return h+'<p class="ehint">'+FDAEdit.tag(it.row||it)+'</p><div class="ebtns"><button type="button" class="btn" data-eact="restore">Restore</button><button type="button" class="btn sec" data-eact="close">Close</button></div></div>'; }
+  var bid=it.kind==='pay'&&!it.guest?FDAEdit.bundleOf(it.row):'';
+  if(bid&&!gone&&EM.mode==='editBundle') return h+bundleEditForm(it,bid)+'</div>';
+  if(gone){ return h+'<p class="ehint">'+FDAEdit.tag(it.row||it)+'</p><div class="ebtns"><button type="button" class="btn" data-eact="restore">'+(bid?'Restore whole bundle':'Restore')+'</button><button type="button" class="btn sec" data-eact="close">Close</button></div></div>'; }
+  if(bid&&EM.mode!=='delete'){ /* R72: a month of a payment in advance is never edited alone */
+    return h+'<p class="ehint">Paid ahead together: '+esc(FDAEdit.bundleMonths(pays(),bid))+'. Change or delete the whole bundle.</p><div class="ebtns"><button type="button" class="btn sec" data-eact="editBundle">Edit whole bundle</button><button type="button" class="btn del" data-eact="delete">Delete</button><button type="button" class="btn sec" data-eact="close">Close</button></div></div>';
+  }
   if(EM.mode==='delete'){
+    if(bid) return h+'<p class="ehint">Deletes every month of this payment from '+esc(monthLabel(ymNow()))+' on ('+esc(FDAEdit.bundleMonths(pays(),bid))+'). Months already over stay paid.</p>'+FDAEdit.reasonBox('eWhy')+'<div class="eerr" id="eErr"></div><div class="ebtns"><button type="button" class="btn del" data-eact="delGo">Delete whole bundle</button><button type="button" class="btn sec" data-eact="close">Keep</button></div></div>';
     return h+FDAEdit.reasonBox('eWhy')+'<div class="eerr" id="eErr"></div><div class="ebtns"><button type="button" class="btn del" data-eact="delGo">Delete'+(it.guest?' guest + RM payment':'')+'</button><button type="button" class="btn sec" data-eact="close">Keep</button></div></div>';
   }
   if(EM.mode==='move'){
@@ -1920,6 +2221,10 @@ function menuHtml(key,it){
   h+='<button type="button" class="btn del" data-eact="delete">Delete</button><button type="button" class="btn sec" data-eact="close">Close</button></div></div>';
   return h;
 }
+/* R72: "Edit whole bundle" = method / received by on every month (plan, months and price never change in place) */
+function bundleEditForm(it,bid){ var p=it.row||{};
+  return '<p class="ehint">'+esc(FDAEdit.bundleMonths(pays(),bid))+'. The plan, months and price can’t change: delete it and record a new one.</p><div class="erow"><div><label for="eBm">Method</label><select id="eBm">'+methods().map(function(x){return '<option'+(x===p.method?' selected':'')+'>'+esc(x)+'</option>';}).join('')+'</select></div><div><label for="eBb">Received by</label><select id="eBb">'+holderOpts(p.received_by||me)+'</select></div></div>'+
+    (p.receipt_no?'<p class="ehint">Receipt '+esc(p.receipt_no)+' will be voided. Make a new one after saving.</p>':'')+'<div class="eerr" id="eErr"></div><div class="ebtns"><button type="button" class="btn" data-eact="bundleGo">Save for every month</button><button type="button" class="btn sec" data-eact="close">Cancel</button></div>'; }
 /* a guest check-in's RM payment on this phone (linked pay_id, else same name + day) */
 function guestPay(a){ var l=pays(),hit=null; l.forEach(function(p){ if(a.pay_id&&p.pay_id===a.pay_id)hit=p; });
   if(!hit)l.forEach(function(p){ if(!hit&&!p.code&&p.kind==='DROPIN'&&String(p.guest_name||'').toLowerCase()===String(a.guest_name||a.name||'').toLowerCase()&&tsDate(p.ts)===String(a.class_key||a.classKey).slice(0,10))hit=p; }); return hit; }
@@ -1938,8 +2243,14 @@ function onMenuClick(e){
   var b=e.target.closest('[data-eact]'); if(!b)return false;
   var a=b.getAttribute('data-eact'), it=ITEMS[EM.key]; if(!it){EM={key:'',mode:''};repaint();return true;}
   if(a==='close'){EM={key:'',mode:''};repaint();return true;}
-  if(a==='delete'||a==='move'||a==='editGuest'||a==='editPay'){ EM.mode=a; if(a==='editPay')PE=null; repaint(); showMenu(); var f=$('eWhy')||$('eGn'); if(f)try{f.focus({preventScroll:true});}catch(x){} return true; }
+  if(a==='delete'||a==='move'||a==='editGuest'||a==='editPay'||a==='editBundle'){ EM.mode=a; if(a==='editPay')PE=null; repaint(); showMenu(); var f=$('eWhy')||$('eGn'); if(f)try{f.focus({preventScroll:true});}catch(x){} return true; }
   var type=it.guest?'guest':it.kind==='att'?'checkin':'payment', err=function(t){var x=$('eErr');if(x)x.textContent=t;else toast(t,true);};
+  var bid=it.kind==='pay'&&!it.guest?FDAEdit.bundleOf(it.row):'', bst=function(r,x){return stamp(r,x);};
+  if(bid&&a==='delGo'){ var bw=String(($('eWhy')||{}).value||'').trim(); if(!bw)return err('Please type why.'),true;
+    change({type:'bundle',action:'delete',id:bid,reason:bw},{what:'payment',patches:FDAEdit.bundlePatches(pays(),bid,'delete',ymNow(),{why:bw},bst)}); return true; }
+  if(bid&&a==='restore'){ change({type:'bundle',action:'restore',id:bid},{what:'payment',patches:FDAEdit.bundlePatches(pays(),bid,'restore',ymNow(),null,bst)}); return true; }
+  if(bid&&a==='bundleGo'){ var bm=$('eBm').value, bb=$('eBb').value;
+    change({type:'bundle',action:'edit',id:bid,patch:{method:bm,receivedBy:bb}},{what:'payment',patches:FDAEdit.bundlePatches(pays(),bid,'edit',ymNow(),{method:bm,received_by:bb},bst)}); return true; }
   if(a==='delGo'){ var why=String(($('eWhy')||{}).value||'').trim(); if(!why)return err('Please type why.'),true;
     change({type:type,action:'delete',id:it.id,reason:why},{what:it.guest?'guest':it.kind==='att'?'check-in':'payment',patches:delPatches(it,why)}); return true; }
   if(a==='restore'){ change({type:type,action:'restore',id:it.id},{patches:restorePatches(it)}); return true; }
@@ -2004,7 +2315,7 @@ function payRowsHtml(list,prefix){
   var h='';
   list.sort(function(a,b){return String(a.ts)<String(b.ts)?1:-1;}).forEach(function(p){
     var it=payItem(p), key=prefix+p.pay_id; ITEMS[key]=it;
-    h+='<div class="person'+(p.void?' voided':'')+(p._local?' pending':'')+'" style="flex-wrap:wrap"><div class="who"><b>'+esc(it.name)+'</b><small class="vx">'+esc(KINDL[p.kind]||p.kind)+' · '+rm(p.amount)+(Number(p.rebate)>0?' (rebate '+rm(p.rebate)+')':'')+' · '+esc(p.method)+' · '+esc(p.received_by)+' · '+esc(tsTime(p.ts))+(tsDate(p.ts)!==Engine.dateStr(now())?' '+esc(Engine.fmtDate(tsDate(p.ts))):'')+'</small>'+FDAEdit.tag(p)+'</div>'+(p._local?'':moreBtn(key))+menuHtml(key,it)+'</div>';
+    h+='<div class="person'+(p.void?' voided':'')+(p._local?' pending':'')+'" style="flex-wrap:wrap"><div class="who"><b>'+esc(it.name)+'</b><small class="vx">'+esc(KINDL[p.kind]||p.kind)+(p.month&&p.month!==ymNow()?' · for '+esc(monthLabel(p.month)):'')+(p.bundle_id?' · paid ahead':'')+' · '+rm(p.amount)+(Number(p.rebate)>0?' ('+(p.promo_id?'promo ':'rebate ')+rm(p.rebate)+')':'')+' · '+esc(p.method)+' · '+esc(p.received_by)+' · '+esc(tsTime(p.ts))+(tsDate(p.ts)!==Engine.dateStr(now())?' '+esc(Engine.fmtDate(tsDate(p.ts))):'')+'</small>'+FDAEdit.tag(p)+'</div>'+(p._local?'':moreBtn(key))+menuHtml(key,it)+'</div>';
   });
   return h;
 }
@@ -2018,7 +2329,12 @@ function registerHandlers(){
   st.on('result',function(x){ RES[x.entry.id]=x.result; });
   st.handle('door_change',function(res,e){
     var undo=e.meta&&e.meta.undo;
-    if(FDAEdit.failed(res)){ FDAEdit.hideToast(); toast((undo?'Undo not done: ':'Not saved: ')+((res&&res.error)||''),true); }
+    if(res&&res.needsConfirm&&e.meta&&e.meta.req){ /* R70: a used month of a payment in advance: ask, then send again with force */
+      var again=Object.assign({},e.meta.req,{force:true}); delete again.requestId;
+      FDAEdit.hideToast(); /* nothing was deleted yet: its "Deleted · Undo" goes, the question takes its place */
+      FDAEdit.confirmBar(res.error,'Delete anyway',function(){ change(again,{what:'payment'}); });
+    }
+    else if(FDAEdit.failed(res)){ FDAEdit.hideToast(); toast((undo?'Undo not done: ':'Not saved: ')+((res&&res.error)||''),true); }
     else if(res.receiptVoided||res.warning) toast([res.receiptVoided?'Receipt '+res.receiptVoided+' voided. Make a new one if needed.':'',res.warning||''].join(' ').trim(),!!res.warning);
     if(tab==='edit'&&S.ed.cls&&!S.ed.busy)openEditClass(S.ed.cls.classKey,true);
     else if(tab==='history')viewHistory();
@@ -2038,6 +2354,10 @@ function registerHandlers(){
     else if(res&&(res.kind==='ERROR'||res.kind==='UNKNOWN'))toast((res.message||'Check-in not saved')+' ('+(e.label||'')+')',true);
   });
   st.handle('door_recordPayment',function(res,e,s){
+    if(e.meta&&e.meta.bundle){ /* R70: the phone's month rows become the real ones (same months, in order) */
+      var mine=s.list('payments').filter(function(r){return r._local===e.id;}).sort(function(a,b){return a.month<b.month?-1:1;});
+      mine.forEach(function(r,i){ s.remove('payments',r.pay_id); if(res&&res.ok&&res.payIds&&res.payIds[i])s.put('payments',res.payIds[i],Object.assign({},r,{pay_id:res.payIds[i],bundle_id:res.bundleId,_local:undefined})); });
+    }
     var row=s.get('payments')['L-'+e.id];
     if(res&&res.ok){ if(row){ s.remove('payments',row.pay_id); s.put('payments',res.payId,Object.assign({},row,{pay_id:res.payId,_local:undefined})); }
       if(S.saved&&S.saved.rid===e.id){S.saved.payId=res.payId;S.saved.newStatus=res.newStatus;S.saved.amountLabel=res.amountLabel||S.saved.amountLabel;}

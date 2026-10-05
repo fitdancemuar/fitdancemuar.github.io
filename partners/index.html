@@ -683,6 +683,71 @@ var Engine = (function () {
     return res;
   }
 
+  // ---------- R70 / R71: pay in advance + promotions ----------
+  var ADV_MAX_MONTHS = 12;
+  /** 'YYYY-MM' plus n months (n may be negative). */
+  function addMonths(ym, n) {
+    var y = +String(ym).slice(0, 4), m = +String(ym).slice(5, 7) - 1 + (Number(n) || 0);
+    y += Math.floor(m / 12); m = ((m % 12) + 12) % 12;
+    return y + '-' + pad(m + 1);
+  }
+  /** Split a sen total over n months: equal shares, the remainder sen on the FIRST month (RM100 / 3 = 33.34 + 33.33 + 33.33). */
+  function splitSen(totalSen, n) {
+    var base = Math.floor(totalSen / n), out = [];
+    for (var i = 0; i < n; i++) out.push(base);
+    out[0] += totalSen - base * n;
+    return out;
+  }
+  /** Short month label: 'Oct 2026'. */
+  function monthShort(ym) {
+    var names = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    return names[+String(ym).slice(5, 7) - 1] + ' ' + String(ym).slice(0, 4);
+  }
+  /**
+   * R70 / R71: the per-month rows of an advance payment (pure; the server re-runs it and never trusts the page).
+   * a = {member, plan 'STD'|'UNL', months 1-12, start 'YYYY-MM', settings, promo?: {name, plan, months, total_price, birthday_combines}}
+   * Without a promo each month costs its normal price (a birthday month gets its discount automatically, birthday TRUE).
+   * With a promo: amount per month = total / months (remainder sen on the first month); a birthday month gets 10% off its share only
+   * when birthday_combines; rebate = the month's normal price - amount (>= 0) so coverage counts the full plan (R58 rule).
+   * -> {error} | {plan, months:[ym], lines:[{month, amount, rebate, value, birthday, list}], total, value, discount, listTotal}
+   *    amount = money collected; value = amount + rebate (what coverage counts); list = the month's normal price for this member.
+   */
+  function advancePlan(a) {
+    a = a || {};
+    var promo = a.promo || null, settings = a.settings, c = cfg(settings);
+    var plan = promo ? String(promo.plan) : String(a.plan || '');
+    var n = promo ? Number(promo.months) : Number(a.months);
+    if (plan === 'PER') return { error: 'Per class can’t be paid in advance. Choose Standard or Unlimited.' };
+    if (plan !== 'STD' && plan !== 'UNL') return { error: 'Choose Standard or Unlimited.' };
+    if (!isFinite(n) || Math.floor(n) !== n || n < 1 || n > ADV_MAX_MONTHS) return { error: 'Choose 1 to ' + ADV_MAX_MONTHS + ' months.' };
+    if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(String(a.start || ''))) return { error: 'Choose the first month.' };
+    var shares = null, combine = false;
+    if (promo) {
+      var tot = toSen(promo.total_price);
+      if (!(tot > 0)) return { error: 'This promotion has no price.' };
+      shares = splitSen(tot, n);
+      combine = isTrue(promo.birthday_combines);
+    }
+    var out = { plan: plan, months: [], lines: [], total: 0, value: 0, discount: 0, listTotal: 0 };
+    var totSen = 0, valSen = 0, listSen = 0;
+    for (var i = 0; i < n; i++) {
+      var ym = addMonths(a.start, i), bday = isBirthdayMonth(a.member, ym);
+      var list = priceSen(plan, bday, settings), amount, normal, bdayApplied;
+      if (!promo) { amount = list; normal = list; bdayApplied = bday; }
+      else {
+        bdayApplied = bday && combine;
+        amount = bdayApplied ? Math.round(shares[i] * (1 - c.disc)) : shares[i];
+        normal = priceSen(plan, bdayApplied, settings); // not combining: the promo share stands in for the full price
+      }
+      var rebate = Math.max(0, normal - amount);
+      out.months.push(ym);
+      out.lines.push({ month: ym, amount: fromSen(amount), rebate: fromSen(rebate), value: fromSen(amount + rebate), birthday: bdayApplied, list: fromSen(list) });
+      totSen += amount; valSen += amount + rebate; listSen += list;
+    }
+    out.total = fromSen(totSen); out.value = fromSen(valSen); out.listTotal = fromSen(listSen); out.discount = fromSen(Math.max(0, listSen - totSen));
+    return out;
+  }
+
   // ---------- month close ----------
   function monthClose(a) {
     var holders = (a.holders || []).slice();
@@ -842,6 +907,7 @@ var Engine = (function () {
     classAt: classAt, nextClass: nextClass, classDates: classDates, sessions: sessions, sessionsAround: sessionsAround, staffClass: staffClass,
     planMonth: planMonth, shownResult: shownResult, monthRange: monthRange, sessionStartMs: startMs, sessionEndMs: endMs, weekStart: weekStart, weekIndex: weekIndex, addDays: addDays, classStart: classStart,
     checkIn: checkIn, paymentOptions: paymentOptions, isImported: isImported,
+    ADV_MAX_MONTHS: ADV_MAX_MONTHS, addMonths: addMonths, splitSen: splitSen, monthShort: monthShort, advancePlan: advancePlan,
     monthClose: monthClose,
     parseFormOption: parseFormOption, birthdayFromIC: birthdayFromIC, parseDob: parseDob,
     normName: normName, healthNote: healthNote, mapRegistrationHeaders: mapRegistrationHeaders,
@@ -870,7 +936,7 @@ if (typeof module !== 'undefined') module.exports = Engine;
  *
  *   st.get('members')        -> {code: row}           (also 'attendance' {att_id: row}, 'payments' {pay_id: row},
  *   st.list('attendance')    -> [rows]                  'coverage' {code|month: row}, 'carry' {code|month: row})
- *   st.get('sessions')       -> [rows]   st.get('settings') -> {...}
+ *   st.get('sessions')       -> [rows]   st.get('settings') -> {...}   st.get('promos') -> [promotions on sale] (R71)
  *   st.meta(key[, value])    -> small page values kept with the data (last screen payloads, labels …)
  *   st.put(coll, id, row) / st.remove(coll, id)   -> local edits (optimistic rows), saved and 'change' emitted
  *   st.sync()                -> Promise; pulls what changed since the last sync (full when none), merges by id
@@ -1002,7 +1068,7 @@ if (typeof module !== 'undefined') module.exports = Engine;
     var syncing = null;
     var store;
 
-    function blank() { return { since: null, members: {}, attendance: {}, payments: {}, coverage: {}, carry: {}, sessions: [], settings: {}, meta: {}, owner: '', syncedAt: 0 }; }
+    function blank() { return { since: null, members: {}, attendance: {}, payments: {}, coverage: {}, carry: {}, sessions: [], settings: {}, promos: [], meta: {}, owner: '', syncedAt: 0 }; }
     function emit(ev, x) { (listeners[ev] || []).slice().forEach(function (f) { try { f(x, store); } catch (e) { if (root.console) root.console.error(e); } }); }
     function all() { return outbox.concat(memOnly); }
     function isPending(id) { return all().some(function (x) { return x.id === id; }); }
@@ -1042,6 +1108,7 @@ if (typeof module !== 'undefined') module.exports = Engine;
       (p.carry || []).forEach(function (r) { data.carry[r.code + '|' + r.month] = r; });
       if (p.sessions && p.sessions.length) data.sessions = p.sessions;
       if (p.settings) data.settings = p.settings;
+      if (p.promos) data.promos = p.promos; // R71: promotions on sale (the whole list, when they changed)
       if (p.months && p.months.length) { // keep only the months the server still sends (last + this)
         var ok = {}; p.months.forEach(function (m) { ok[m] = true; });
         Object.keys(data.attendance).forEach(function (id) { var r = data.attendance[id]; if (!r._local && r.plan_month && !ok[r.plan_month] && !ok[String(r.class_key).slice(0, 7)]) delete data.attendance[id]; });
@@ -1192,7 +1259,7 @@ if (typeof module !== 'undefined') module.exports = Engine;
       get: function (c) { return data[c]; },
       list: function (c) { var m = data[c] || {}; return Array.isArray(m) ? m.slice() : Object.keys(m).map(function (k) { return m[k]; }); },
       meta: function (k, v) { if (arguments.length > 1) { data.meta[k] = v; saveData(); return v; } return data.meta[k]; },
-      put: function (c, id, row) { if (c === 'sessions' || c === 'settings') data[c] = row; else data[c][id] = row; changed({ put: c }); return row; },
+      put: function (c, id, row) { if (c === 'sessions' || c === 'settings' || c === 'promos') data[c] = row; else data[c][id] = row; changed({ put: c }); return row; },
       remove: function (c, id) { delete data[c][id]; changed({ remove: c }); },
       since: function () { return data.since; },
       syncedAt: function () { return data.syncedAt; },
@@ -1265,10 +1332,17 @@ if (typeof module !== 'undefined') module.exports = Engine;
 .voided{opacity:.62}
 .etag{display:inline-block;font-size:11px;font-weight:700;letter-spacing:.04em;border-radius:999px;padding:1px 8px;border:1px solid var(--muted);color:var(--muted);white-space:normal;margin-top:3px}
 .etag.del{border-color:var(--pink);color:var(--pink)}
-.utoast{position:fixed;left:12px;right:12px;bottom:16px;max-width:480px;margin:0 auto;display:flex;align-items:center;gap:12px;background:var(--surface);border:1px solid var(--green);color:var(--ink);border-radius:14px;padding:8px 8px 8px 16px;z-index:90;box-shadow:none}
-.utoast span{flex:1;font-weight:700;min-width:0}
+.tstack{position:fixed;left:12px;right:12px;bottom:16px;max-width:480px;margin:0 auto;display:flex;flex-direction:column;gap:8px;z-index:90;pointer-events:none}
+.tstack:empty{display:none}
+.utoast{pointer-events:auto;display:flex;flex-wrap:wrap;align-items:center;gap:8px 12px;background:var(--surface);border:1px solid var(--green);color:var(--ink);border-radius:14px;padding:8px 8px 8px 16px;box-shadow:none;min-width:0}
+.utoast span{flex:1 1 160px;font-weight:700;min-width:0;overflow-wrap:anywhere}
 .utoast .btn{min-height:48px;padding:0 18px;background:var(--green);color:var(--dark)}
 .utoast.err{border-color:var(--pink)}
+.utoast.note{background:var(--green);color:var(--dark);border-color:var(--green);padding:12px 16px;text-align:center}
+.utoast.note.err{background:var(--pink);color:#fff;border-color:var(--pink)}
+.utoast.confirm span{flex:1 1 100%}
+.utoast.confirm .btn{flex:1 1 auto}
+.utoast.confirm .btn.no{background:var(--surface-2);color:var(--ink)}
 </style>
 <script>
 /* FDAEdit (R67): helpers shared by Peggy's console and the partners console. Plain ES5. */
@@ -1284,20 +1358,82 @@ if (typeof module !== 'undefined') module.exports = Engine;
     return '';
   }
   function isGone(o) { return !!o && (o.void === true || o.voided === true || o.result === 'VOID'); }
-  var timer = null, el = null;
-  /** "Saved · Undo" for 10 s (R67). undo: function or null (then only the message). */
-  function undoToast(msg, undo, err) {
-    if (!root.document) return;
-    if (!el) { el = root.document.createElement('div'); el.setAttribute('role', 'status'); el.setAttribute('aria-live', 'polite'); root.document.body.appendChild(el); }
-    clearTimeout(timer);
-    el.className = 'utoast' + (err ? ' err' : '');
-    el.innerHTML = '<span>' + esc(msg) + '</span>' + (undo ? '<button type="button" class="btn">Undo</button>' : '');
-    el.style.display = 'flex';
-    var b = el.querySelector('button');
-    if (b) b.onclick = function () { hide(); try { undo(); } catch (e) { if (root.console) root.console.error(e); } };
-    timer = setTimeout(hide, undo ? 10000 : 3000);
+  // ---- R72: ONE toast stack at the bottom for both consoles. "Saved · Undo" (10 s), plain messages / warnings (console toast())
+  //      and the "Delete anyway?" bar are separate items stacked above each other: nothing overlaps, and a later toast never
+  //      swallows an Undo that is still inside its 10 s. At most 3 plain messages at once (the oldest message goes first; an
+  //      Undo is never pushed out early). The page gets bottom padding while toasts show, so the last row stays reachable.
+  var stack = null, items = [], MAX_NOTES = 3;
+  function doc() { return root.document || null; }
+  function box() {
+    var d = doc();
+    if (!stack) {
+      stack = d.createElement('div'); stack.className = 'tstack'; stack.setAttribute('role', 'status'); stack.setAttribute('aria-live', 'polite');
+      d.body.appendChild(stack);
+    }
+    return stack;
   }
-  function hide() { clearTimeout(timer); if (el) el.style.display = 'none'; }
+  function pad() {
+    var d = doc(); if (!d || !d.body || !stack) return;
+    d.body.style.paddingBottom = items.length ? ((stack.offsetHeight || items.length * 64) + 24) + 'px' : '';
+  }
+  function drop(it) {
+    if (!it) return;
+    clearTimeout(it.timer);
+    var i = items.indexOf(it); if (i >= 0) items.splice(i, 1);
+    if (it.node && it.node.parentNode) it.node.parentNode.removeChild(it.node);
+    pad();
+  }
+  function btn(label, extraClass, onClick) {
+    var b = doc().createElement('button'); b.type = 'button'; b.className = 'btn' + (extraClass ? ' ' + extraClass : ''); b.textContent = label;
+    b.onclick = onClick; return b;
+  }
+  function add(kind, msg, cls, ms) {
+    var d = doc(), node = d.createElement('div'), span = d.createElement('span');
+    node.className = 'utoast' + (cls ? ' ' + cls : ''); span.textContent = String(msg == null ? '' : msg); node.appendChild(span);
+    // Undo / confirm toasts sit at the bottom of the stack, messages above them: a message timing out never moves an Undo
+    // button out from under the finger (found in the 390 px check: the Undo jumped down when the receipt message expired)
+    node.style.order = kind === 'note' ? '0' : '1';
+    var it = { kind: kind, node: node, msg: String(msg) };
+    box().appendChild(node); items.push(it);
+    it.timer = setTimeout(function () { drop(it); }, ms);
+    var notes = items.filter(function (x) { return x.kind === 'note'; });
+    while (notes.length > MAX_NOTES) drop(notes.shift());
+    return it;
+  }
+  /** "Saved · Undo" for 10 s (R67). undo: function or null (then only the message, 3 s). Returns the toast (for hideToast). */
+  function undoToast(msg, undo, err) {
+    if (!doc()) return null;
+    var it = add(undo ? 'undo' : 'note', msg, (err ? 'err' : '') + (undo ? '' : ' note'), undo ? 10000 : 3000);
+    if (undo) it.node.appendChild(btn('Undo', '', function () { drop(it); try { undo(); } catch (e) { if (root.console) root.console.error(e); } }));
+    pad();
+    return it;
+  }
+  /** a plain message / warning (the consoles' toast()): err = pink, shown 5 s; same text again restarts it instead of piling up */
+  function note(msg, err) {
+    if (!doc()) return null;
+    var last = items.filter(function (x) { return x.kind === 'note'; }).pop();
+    if (last && last.msg === String(msg)) drop(last);
+    var it = add('note', msg, 'note' + (err ? ' err' : ''), err ? 5000 : 2800);
+    pad();
+    return it;
+  }
+  /** hide one toast (default: the newest "Saved · Undo", e.g. that write failed); other toasts stay */
+  function hide(it) {
+    if (it && it.node) return drop(it);
+    var u = items.filter(function (x) { return x.kind === 'undo'; }).pop();
+    drop(u);
+  }
+  /** R70: an in-page "are you sure?" bar (a used month of a payment in advance): yesLabel runs onYes; Cancel closes (30 s). */
+  function confirmBar(msg, yesLabel, onYes) {
+    if (!doc()) return null;
+    var it = add('confirm', msg, 'err confirm', 30000);
+    it.node.appendChild(btn(yesLabel || 'Yes', 'yes', function () { drop(it); try { onYes(); } catch (e) { if (root.console) root.console.error(e); } }));
+    it.node.appendChild(btn('Cancel', 'no', function () { drop(it); }));
+    pad();
+    return it;
+  }
+  /** the toasts on screen (tests) */
+  function toasts() { return items.map(function (x) { return { kind: x.kind, msg: x.msg }; }); }
   /** The in-page "why?" box for a delete (never window.confirm). */
   function reasonBox(id, label) {
     return '<label for="' + id + '">' + esc(label || 'Why delete it? (shown on the list)') + '</label><input id="' + id + '" maxlength="200" autocomplete="off" placeholder="e.g. wrong member">';
@@ -1311,7 +1447,105 @@ if (typeof module !== 'undefined') module.exports = Engine;
     d.setUTCDate(d.getUTCDate() - wd - 7);
     return d.toISOString().slice(0, 10);
   }
-  root.FDAEdit = { tag: tag, isGone: isGone, undoToast: undoToast, hideToast: hide, reasonBox: reasonBox, failed: failed, peggyFrom: peggyFrom, esc: esc };
+  // ---- R72: a month of a payment in advance (bundle) is never edited on its own: "Edit whole bundle" (method / received by) or
+  //      "Delete" (every month from this month on). These build the optimistic rows for the phone's copy; the server decides.
+  /** the bundle id of a payment row ('' = a normal payment) */
+  function bundleOf(row) { return String((row && row.bundle_id) || ''); }
+  /** list = the phone's payment rows; action 'delete' | 'restore' | 'edit'; ym = this month; set = {method, received_by} (edit);
+      stampFn(row, extra) -> stamped copy. -> [{coll:'payments', id, row}] */
+  function bundlePatches(list, bid, action, ym, set, stampFn) {
+    var out = [];
+    (list || []).forEach(function (r) {
+      if (!bid || bundleOf(r) !== bid) return;
+      var gone = r.void === true;
+      if (action === 'delete' && !gone && String(r.month) >= ym) out.push({ coll: 'payments', id: r.pay_id, row: stampFn(r, { void: true, void_reason: 'Bundle deleted: ' + (set && set.why || '') }) });
+      if (action === 'restore' && gone && /^Bundle deleted: /.test(String(r.void_reason || ''))) out.push({ coll: 'payments', id: r.pay_id, row: stampFn(r, { void: false, void_reason: '' }) });
+      if (action === 'edit' && !gone) out.push({ coll: 'payments', id: r.pay_id, row: stampFn(r, { method: set.method, received_by: set.received_by }) });
+    });
+    return out;
+  }
+  /** "Oct, Nov, Dec 2026" of the bundle's months on this phone (live rows; all rows when every month is deleted) */
+  function bundleMonths(list, bid) {
+    var rows = (list || []).filter(function (r) { return bid && bundleOf(r) === bid; }), live = rows.filter(function (r) { return r.void !== true; });
+    var ms = (live.length ? live : rows).map(function (r) { return String(r.month); }).sort();
+    var n = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    return ms.map(function (ym, i) { var nx = ms[i + 1]; return n[+ym.slice(5, 7) - 1] + (!nx || nx.slice(0, 4) !== ym.slice(0, 4) ? ' ' + ym.slice(0, 4) : ''); }).join(', ');
+  }
+  root.FDAEdit = { tag: tag, isGone: isGone, undoToast: undoToast, confirmBar: confirmBar, hideToast: hide, note: note, toasts: toasts, reasonBox: reasonBox, failed: failed, peggyFrom: peggyFrom, esc: esc,
+    bundleOf: bundleOf, bundlePatches: bundlePatches, bundleMonths: bundleMonths };
+})(typeof window !== 'undefined' ? window : globalThis);
+</script>
+
+<style>
+/* R70 / R71: pay in advance + promotions (shared by Peggy's Pay and the partners' Record payment) */
+.adv-bd{width:100%;border-collapse:collapse;margin:8px 0 4px;font-size:15px}
+.adv-bd td{padding:6px 4px;border-bottom:1px solid var(--line);vertical-align:top}
+.adv-bd td.n{text-align:right;white-space:nowrap;font-variant-numeric:tabular-nums}
+.adv-bd tr.tot td{border-bottom:0;border-top:2px solid var(--ink);font-weight:800;font-size:17px}
+.adv-bd tr.disc td{color:var(--yellow)}
+.adv-bd small{color:var(--muted)}
+.adv-warn{background:var(--surface-2);border:1px solid var(--pink);border-radius:12px;padding:10px 12px;margin:8px 0;color:var(--ink);font-size:14px}
+.adv-row{display:grid;grid-template-columns:1fr 1fr;gap:8px}.adv-row>div{min-width:0}
+.adv-row select{width:100%;box-sizing:border-box}
+</style>
+<script>
+/* FDAAdv (R70 / R71): the price breakdown of a payment in advance, computed on the phone with the shared Engine (the server
+   re-checks every number and refuses a month already paid). Plain ES5. */
+(function (root) {
+  function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); }
+  var MON = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+  function monthLabel(ym) { return MON[+String(ym).slice(5, 7) - 1] + ' ' + String(ym).slice(0, 4); }
+  function today() { return root.Engine.dateStr(new Date()); }
+  /** promotions on sale today (the list from the server / sync; sell dates re-checked on the phone) */
+  function onSale(list) {
+    var t = today();
+    return (list || []).filter(function (p) { return p && p.active !== false && (!p.sellFrom || t >= p.sellFrom) && (!p.sellTo || t <= p.sellTo); });
+  }
+  /** first months a promo (or a plain advance payment: promo null) may start, from this month ym */
+  function starts(promo, ym) {
+    var E = root.Engine;
+    if (promo && promo.firstMonthRule === 'this month') return [ym];
+    if (promo && promo.firstMonthRule === 'next month') return [E.addMonths(ym, 1)];
+    var out = []; for (var i = 0; i < 12; i++) out.push(E.addMonths(ym, i)); return out;
+  }
+  /** Engine.advancePlan for a page: a = {member:{code, bday_month}, plan, months, start, promo (page shape) | null, settings (Engine keys)} */
+  function quote(a) {
+    var p = a.promo ? { name: a.promo.name, plan: a.promo.plan, months: a.promo.months, total_price: a.promo.total, birthday_combines: a.promo.birthdayCombines } : null;
+    return root.Engine.advancePlan({ member: a.member, plan: a.plan, months: Number(a.months), start: a.start, settings: a.settings, promo: p });
+  }
+  /** months of the quote that already have a payment (paidMonths: ['YYYY-MM']) */
+  function clashes(q, paidMonths) {
+    var have = {}; (paidMonths || []).forEach(function (m) { have[m] = true; });
+    return ((q && q.months) || []).filter(function (m) { return have[m]; });
+  }
+  /** the price breakdown table: one line per month, the promotion discount, the total */
+  function breakdown(q, promo, paidMonths) {
+    var E = root.Engine;
+    if (!q || q.error) return '<div class="adv-warn">' + esc((q && q.error) || 'Choose a plan and months.') + '</div>';
+    var plan = q.plan === 'UNL' ? 'Unlimited' : 'Standard', h = '<table class="adv-bd">', clash = clashes(q, paidMonths);
+    q.lines.forEach(function (l) {
+      var price = promo ? l.value : l.amount;
+      h += '<tr><td>' + esc(monthLabel(l.month)) + ' <small>' + plan + (l.birthday ? ' · 🎂 10% off' : '') + (clash.indexOf(l.month) >= 0 ? ' · <b style="color:var(--pink)">already paid</b>' : '') + '</small></td><td class="n">' + E.fmtRM(price) + '</td></tr>';
+    });
+    var disc = 0; q.lines.forEach(function (l) { disc += E.toSen(l.rebate); });
+    if (promo && disc) h += '<tr class="disc"><td>Promo: ' + esc(promo.name) + '</td><td class="n">−' + E.fmtRM(E.fromSen(disc)) + '</td></tr>';
+    h += '<tr class="tot"><td>Total · ' + q.lines.length + ' month' + (q.lines.length === 1 ? '' : 's') + '</td><td class="n">' + E.fmtRM(q.total) + '</td></tr></table>';
+    if (clash.length) h += '<div class="adv-warn">Already paid: ' + esc(clash.map(monthLabel).join(', ')) + '. Choose a later first month or fewer months.</div>';
+    return h;
+  }
+  /** "Oct, Nov, Dec 2026" */
+  function monthsShort(months) {
+    var n = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    return (months || []).map(function (ym, i) { var nx = months[i + 1]; return n[+ym.slice(5, 7) - 1] + (!nx || nx.slice(0, 4) !== ym.slice(0, 4) ? ' ' + ym.slice(0, 4) : ''); }).join(', ');
+  }
+  /** optimistic local rows of a bundle (replaced by the server's rows at the next sync) */
+  function localRows(q, code, method, by, promo, id, ts) {
+    return q.lines.map(function (l, i) {
+      return { pay_id: 'L-' + id + '-' + i, _local: id, code: code, month: l.month, kind: q.plan, amount: l.amount, rebate: l.rebate, method: method, received_by: by,
+        void: false, ts: ts, bundle_id: 'B' + id, promo_id: promo ? promo.promoId : '' };
+    });
+  }
+  root.FDAAdv = { onSale: onSale, starts: starts, quote: quote, clashes: clashes, breakdown: breakdown, monthLabel: monthLabel, monthsShort: monthsShort, localRows: localRows };
 })(typeof window !== 'undefined' ? window : globalThis);
 </script>
 
@@ -1538,6 +1772,7 @@ function handleErr(e){
   toast(/network|HTTP 0|fetch|offline/i.test(m) ? 'No connection. Showing what this phone has.' : 'Something went wrong. Please try again.', true);
 }
 function toast(msg, err){
+  if (window.FDAEdit && FDAEdit.note && document.body) { FDAEdit.note(msg, err); return; } /* R72: one toast stack (never over Undo) */
   var box = document.getElementById('toastBox');
   box.innerHTML = '<div class="toast' + (err ? ' err' : '') + '" role="status">' + esc(msg) + '</div>';
   clearTimeout(toast.t); toast.t = setTimeout(function(){ box.innerHTML = ''; }, err ? 5000 : 2800);
@@ -1733,6 +1968,13 @@ function swapLocalRow(r, entry){
 function onPayResult(r, entry){
   r = r || {};
   var P = PAY && PAY.rid === entry.id ? PAY : null, meta = entry.meta || {};
+  if (meta.bundle && S.store) { /* R70: the phone's month rows become the real ones (same months, in order) */
+    S.store.list('payments').filter(function(x){ return x._local === entry.id; }).sort(function(a, b){ return a.month < b.month ? -1 : 1; }).forEach(function(x, i){
+      S.store.remove('payments', x.pay_id);
+      if (r.ok && r.payIds && r.payIds[i]) { var y = Object.assign({}, x, { pay_id: r.payIds[i], bundle_id: r.bundleId }); delete y._local; S.store.put('payments', r.payIds[i], y); }
+    });
+    if (r.ok) { r.monthsLabel = r.monthsLabel || meta.monthsLabel; r.promoName = r.promoName || meta.promoName; }
+  }
   if (!r.ok) {
     toast((meta.name ? meta.name + ': ' : '') + (r.error || 'Payment not saved'), true);
     if (P) { P.saving = false; P.rid = ''; if (/refresh/i.test(r.error || '')) openPay(P.code, P.target, P.month); else drawPay(true); }
@@ -2036,14 +2278,14 @@ function localPayCtx(code, month){
 }
 function openPay(code, target, month){
   month = month || S.ym;
-  PAY = { code: code, target: target, month: month, rid: '', sel: -1, method: 'Cash', holder: S.actor, ctx: localPayCtx(code, month), done: null };
+  PAY = { code: code, target: target, month: month, rid: '', sel: -1, method: 'Cash', holder: S.actor, ctx: localPayCtx(code, month), done: null, mode: 'now', adv: { promoId: '', plan: 'STD', months: 3, start: '' } };
   if (target === 'dr_pay') openDrawer(drawerHead('Record payment') + '<div id="dr_pay">' + payHtml() + '</div>');
   else if ($(target)) $(target).innerHTML = payHtml();
   var mine = PAY;
   api('partners_paymentContext', code, month).then(function(c){
     if (PAY !== mine) return;
     if (c && c.error) { PAY.err = c.error; PAY.ctx = null; drawPay(); return; } /* the server's answer wins over the phone's guess (e.g. R64.6 month) */
-    var keep = PAY.sel >= 0 && PAY.ctx ? PAY.ctx.options[PAY.sel].kind : '';
+    var keep = PAY.sel >= 0 && PAY.ctx && PAY.ctx.options[PAY.sel] ? PAY.ctx.options[PAY.sel].kind : '';
     PAY.ctx = c; PAY.sel = -1;
     c.options.forEach(function(o, i){ if (o.kind === keep) PAY.sel = i; });
     if (c.defaultHolder && PAY.method !== 'TNG') PAY.holder = c.defaultHolder;
@@ -2062,14 +2304,18 @@ function payHtml(){
   if (P.saving && !P.done) return '<div class="card"><div class="status noclass" style="margin:0"><div class="who2">' + esc(P.ctx ? P.ctx.name : P.code) + '</div><div class="word">SAVING</div><div class="sub" id="pay_ptext">' + esc(pendingText(P.rid)) + '</div></div></div>';
   if (P.done) {
     var r = P.done;
-    return '<div class="card"><div class="status paid" style="margin:0 0 10px"><div class="who2">' + esc(r.name || '') + '</div><div class="word">PAID</div><div class="sub">' + esc(r.amountLabel) + (r.rebateLabel && r.rebateLabel !== 'RM0.00' ? ' · rebate ' + esc(r.rebateLabel) : '') + '</div></div>' +
+    return '<div class="card"><div class="status paid" style="margin:0 0 10px"><div class="who2">' + esc(r.name || '') + '</div><div class="word">PAID</div><div class="sub">' + esc(r.amountLabel) + (r.rebateLabel && r.rebateLabel !== 'RM0.00' ? ' · rebate ' + esc(r.rebateLabel) : '') +
+      (r.monthsLabel ? '<br>' + (r.promoName ? esc(r.promoName) + ' · ' : '') + esc(r.monthsLabel) : '') + '</div></div>' +
       (r.payId ? '<div class="bar"><button class="btn secondary sm" type="button" data-act="payReceipt" data-id="' + esc(r.payId) + '">Make receipt</button><span id="pay_rcpt"></span></div>' : '') + '</div>';
   }
   var c = P.ctx, B = S.boot || {};
   if (!c) return '<div class="card">' + (P.err ? '<div class="error">' + esc(P.err) + '</div>' : spin()) + '</div>';
   var months = [S.ym, addMonth(S.ym, -1)];
   var o = c.options[P.sel];
-  return '<div class="card pay"><h3>' + esc(c.name) + ' <small class="muted">' + esc(c.code) + '</small></h3>' +
+  /* R70 / R71: this month (as before) or months ahead / a promotion */
+  var modeSeg = '<div class="seg" role="group" aria-label="Payment type"><button class="chip" type="button" data-act="payMode" data-v="now" aria-pressed="' + (P.mode !== 'adv') + '">This month</button><button class="chip" type="button" data-act="payMode" data-v="adv" aria-pressed="' + (P.mode === 'adv') + '">Months ahead · promos</button></div>';
+  if (P.mode === 'adv') return '<div class="card pay"><h3>' + esc(c.name) + ' <small class="muted">' + esc(c.code) + '</small></h3>' + modeSeg + payAdvHtml() + '</div>';
+  return '<div class="card pay"><h3>' + esc(c.name) + ' <small class="muted">' + esc(c.code) + '</small></h3>' + modeSeg +
     '<div class="seg" role="group" aria-label="Month">' + months.map(function(m){ return '<button class="chip" type="button" data-act="payMonth" data-v="' + m + '" aria-pressed="' + (P.month === m) + '">' + esc(monthLabel(m)) + '</button>'; }).join('') + '</div>' +
     '<p class="sub">Paid so far in ' + esc(c.monthLabel) + ': ' + esc(c.paidLabel) + (c.birthday ? ' · <b style="color:var(--yellow)">birthday prices</b>' : '') + (c.local ? ' · checking…' : '') + '</p>' +
     (c.options.length ? c.options.map(function(x, i){ return '<button class="optcard' + (P.sel === i ? ' on' : '') + '" type="button" data-act="payOpt" data-v="' + i + '"><span>' + esc(x.label) + '</span><b>' + esc(x.amountLabel) + '</b></button>'; }).join('') +
@@ -2081,6 +2327,52 @@ function payHtml(){
       '<p><button class="btn good block" type="button" data-act="paySave" id="tp_save"' + (o ? '' : ' disabled') + '>' + (o ? 'Save · collect <span id="tp_collect">' + esc(o.amountLabel) + '</span>' : 'Choose what they pay') + '</button></p>'
       : '<p class="muted">Nothing more to pay for ' + esc(c.monthLabel) + ' (Unlimited).</p>') + '</div>';
 }
+/* ---- R70 / R71 months ahead + promotions: breakdown computed on the phone (Engine); the server re-checks everything */
+function advA(){ return PAY.ctx && PAY.ctx.advance ? PAY.ctx.advance : null; }
+function advPromos(){ var a = advA(); return FDAAdv.onSale(a ? a.promos : local('promos')); }
+function advPromo(){ var id = PAY.adv.promoId, o = null; advPromos().forEach(function(x){ if (x.promoId === id) o = x; }); return o; }
+function advPaid(){ var a = advA(); if (a) return a.paidMonths || []; var o = {}; local('payments').forEach(function(x){ if (x.code === PAY.code && !x.void && x.month >= S.ym) o[x.month] = 1; }); return Object.keys(o).sort(); }
+function advQuote(){
+  var A = PAY.adv, pr = advPromo(), st = FDAAdv.starts(pr, S.ym), m = memberLocal(PAY.code) || {}, set = settingsLocal();
+  if (!A.start || st.indexOf(A.start) < 0) { var paid = advPaid(); A.start = st.filter(function(x){ return paid.indexOf(x) < 0; })[0] || st[0]; }
+  return FDAAdv.quote({ member: { code: PAY.code, bday_month: m.bday_month }, plan: pr ? pr.plan : A.plan, months: pr ? pr.months : A.months, start: A.start, promo: pr, settings: set ? PL.engineSettings(set) : {} });
+}
+function payAdvHtml(){
+  var P = PAY, A = P.adv, B = S.boot || {}, promos = advPromos(), pr = advPromo(), paid = advPaid();
+  if (A.promoId && !pr) A.promoId = '';
+  var q = advQuote(), st = FDAAdv.starts(pr, S.ym), bad = !q || q.error || FDAAdv.clashes(q, paid).length || (pr && pr.limitReached);
+  return '<span class="label" style="display:block;margin-top:12px">Promotion</span>' +
+    '<button class="optcard' + (!pr ? ' on' : '') + '" type="button" data-act="advPromo" data-v=""><span>No promotion · choose plan and months</span><b></b></button>' +
+    promos.map(function(x){ return '<button class="optcard' + (pr && pr.promoId === x.promoId ? ' on' : '') + '" type="button" data-act="advPromo" data-v="' + esc(x.promoId) + '"' + (x.limitReached ? ' disabled' : '') + '><span>' + esc(x.name) + '<br><small class="muted">' + (x.plan === 'UNL' ? 'Unlimited' : 'Standard') + ' × ' + x.months + ' month' + (x.months === 1 ? '' : 's') + (x.firstMonthRule !== 'any' ? ' · starts ' + esc(x.firstMonthRule) : '') + (x.limitReached ? ' · already bought (limit ' + x.maxPerMember + ')' : '') + '</small></span><b>' + esc(x.totalLabel || Engine.fmtRM(x.total)) + '</b></button>'; }).join('') +
+    (promos.length ? '' : '<p class="sub">No promotions on sale right now.</p>') +
+    (pr ? '' : '<span class="label" style="display:block;margin-top:12px">Plan</span><div class="seg" role="group" aria-label="Plan"><button class="chip" type="button" data-act="advPlan" data-v="STD" aria-pressed="' + (A.plan === 'STD') + '">Standard</button><button class="chip" type="button" data-act="advPlan" data-v="UNL" aria-pressed="' + (A.plan === 'UNL') + '">Unlimited</button></div>') +
+    '<div class="f2">' + (pr ? '' : '<div><label for="adv_months">Months</label><select id="adv_months" data-chg="advMonths">' + opts([1,2,3,4,5,6,7,8,9,10,11,12].map(function(n){ return { v: n, l: n + ' month' + (n === 1 ? '' : 's') }; }), A.months) + '</select></div>') +
+    '<div><label for="adv_start">First month</label><select id="adv_start" data-chg="advStart">' + opts(st.map(function(ym){ return { v: ym, l: monthLabel(ym) + (paid.indexOf(ym) >= 0 ? ' (paid)' : '') }; }), A.start) + '</select></div></div>' +
+    '<div id="adv_sum">' + FDAAdv.breakdown(q, pr, paid) + '</div>' +
+    '<span class="label" style="display:block;margin-top:12px">Method</span><div class="seg" role="group" aria-label="Method">' + (B.methods || ['Cash','TNG','Bank transfer']).map(function(m){ return '<button class="chip" type="button" data-act="payMethod" data-v="' + esc(m) + '" aria-pressed="' + (P.method === m) + '">' + esc(m) + '</button>'; }).join('') + '</div>' +
+    '<div class="f2"><div><label for="tp_by">Received by</label><select id="tp_by">' + opts(B.holders || [S.actor], P.holder) + '</select></div></div>' +
+    '<p><button class="btn good block" type="button" data-act="advSave" id="adv_save"' + (bad ? ' disabled' : '') + '>' + (bad ? 'Save payment' : 'Save · collect ' + esc(Engine.fmtRM(q.total))) + '</button></p>';
+}
+ACT.payMode = function(b, v){ PAY.mode = v; if (v === 'adv' && PAY.month !== S.ym) { openPay(PAY.code, PAY.target, S.ym); PAY.mode = 'adv'; } drawPay(); };
+ACT.advPromo = function(b, v){ if (b.disabled) return; PAY.adv.promoId = v || ''; PAY.adv.start = ''; drawPay(); };
+ACT.advPlan = function(b, v){ PAY.adv.plan = v; drawPay(); };
+CHG.advMonths = function(t){ PAY.adv.months = Number(t.value); drawPay(); };
+CHG.advStart = function(t){ PAY.adv.start = t.value; drawPay(); };
+ACT.advSave = function(b){
+  var P = PAY, pr = advPromo(), q = advQuote();
+  if (!q || q.error) { toast((q && q.error) || 'Choose a plan and months.', true); return; }
+  var clash = FDAAdv.clashes(q, advPaid()); if (clash.length) { toast('Already paid: ' + clash.map(monthLabel).join(', '), true); return; }
+  var req = { code: P.code, plan: q.plan, months: q.lines.length, start: q.months[0], promoId: pr ? pr.promoId : '', total: q.total, method: P.method, receivedBy: val('tp_by'), requestId: P.rid };
+  b.disabled = true;
+  var name = P.ctx.name;
+  P.saving = true;
+  var prid = P.rid = S.store.write('partners_recordPayment', function(r){ req.requestId = r; return [req]; }, {
+    label: 'Payment ' + name + ' · ' + FDAAdv.monthsShort(q.months), meta: { code: P.code, name: name, bundle: true, monthsLabel: FDAAdv.monthsShort(q.months), promoName: pr ? pr.name : '' },
+    optimistic: function(st, r){ FDAAdv.localRows(q, P.code, req.method, req.receivedBy, pr, r, new Date().toISOString()).forEach(function(x){ x.date = todayStr(); st.put('payments', x.pay_id, x); }); }
+  });
+  FDAEdit.undoToast('Payment saved', function(){ pundo(prid, function(res){ return res.payId ? { type: 'payment', action: 'delete', id: res.payId, reason: 'Undo', force: true } : null; }); if (PAY && PAY.rid === prid) PAY = null; });
+  drawPay();
+};
 function payCollect(){
   if (!PAY || !PAY.ctx) return;
   var o = PAY.ctx.options[PAY.sel]; if (!o || !$('tp_collect')) return;
@@ -2522,7 +2814,7 @@ ACT.saAdd = function(){ var code = codeFrom(val('sa_add')); if (!code) toast('Ch
 <!-- Partners console: Money (R45 FIT TNG, R58 rebates, R59 record payment) and Dashboard (+ R46 monthly report). -->
 <script>
 VIEWS.money = function(){
-  $main.innerHTML = '<div class="bar">' + monthBar('mm', S.moneyYm).replace(/^<div class="bar">|<\/div>$/g, '') + '<button class="btn" type="button" data-act="mnPay">Record payment</button></div><div id="mbody"></div>';
+  $main.innerHTML = '<div class="bar">' + monthBar('mm', S.moneyYm).replace(/^<div class="bar">|<\/div>$/g, '') + '<button class="btn" type="button" data-act="mnPay">Record payment</button><button class="btn secondary" type="button" data-act="promoOpen">Promotions</button></div><div id="mbody"></div>';
   var c = cGet('money_' + S.moneyYm);
   if (c && !S.money) { S.money = c.list; S.close = c.close; }
   if (S.money && S.close && S.close.month === S.moneyYm) drawMoney(); else $('mbody').innerHTML = spin();
@@ -2546,8 +2838,9 @@ function drawMoney(){
       (p.void || !p.code ? '' : '<button class="btn secondary sm" type="button" data-act="mkReceipt" data-src="Payment" data-id="' + esc(p.pay_id) + '">Make receipt</button>');
     var lp = ((S.store && S.store.get('payments')) || {})[p.pay_id], row = Object.assign({}, p, lp ? { ts: lp.ts } : {});
     var it = { kind: 'pay', id: p.pay_id, code: p.code, guest: !p.code, void: !!p.void, name: p.name, row: row, payRow: row };
-    return '<div class="item' + (p.void ? ' voided' : '') + '"><div class="grow"><b>' + esc(p.name) + '</b> <small>' + esc(p.code) + '</small><br><small class="vx">' + fmtD(p.date) + ' · ' + esc(KIND[p.kind] || p.kind) + ' · ' + esc(p.method) + ' · held by ' + esc(p.received_by) +
-      (Number(p.rebate) > 0 ? ' · <span style="color:var(--yellow)">rebate ' + rm(p.rebate) + (p.rebate_reason ? ' (' + esc(p.rebate_reason) + ')' : '') + '</span>' : '') + '</small> ' + ptag(p) + '</div><span class="amt">' + rm(p.amount) + '</span>' + pmore(it) +
+    var forM = p.month && p.month !== S.moneyYm ? ' · <b>for ' + esc(monthLabel(p.month)) + '</b>' + (p.cash ? '' : ' (paid ' + fmtD(p.date) + ')') : '';
+    return '<div class="item' + (p.void ? ' voided' : '') + '"><div class="grow"><b>' + esc(p.name) + '</b> <small>' + esc(p.code) + '</small><br><small class="vx">' + fmtD(p.date) + ' · ' + esc(KIND[p.kind] || p.kind) + forM + (p.bundle_id ? ' · paid ahead' : '') + ' · ' + esc(p.method) + ' · held by ' + esc(p.received_by) +
+      (Number(p.rebate) > 0 ? ' · <span style="color:var(--yellow)">' + (p.promo_id ? 'promo ' : 'rebate ') + rm(p.rebate) + (p.rebate_reason ? ' (' + esc(p.rebate_reason) + ')' : '') + '</span>' : '') + '</small> ' + ptag(p) + '</div><span class="amt">' + rm(p.amount) + '</span>' + pmore(it) +
       '<div class="inline" id="pact_' + esc(p.pay_id) + '">' + rcp + '</div>' + pslot(it) + '</div>';
   }).join('');
   var oi = (m.otherIncome || []).map(function(o){ var rcp = o.void ? '' : o.receipt_no ? (o.receipt_url ? '<a class="btn secondary sm" target="_blank" rel="noopener" href="' + esc(o.receipt_url) + '">Receipt ' + esc(o.receipt_no) + '</a>' : '<span class="pill grey">' + esc(o.receipt_no) + '</span>') : '<button class="btn secondary sm" type="button" data-act="mkReceipt" data-src="OtherIncome" data-id="' + esc(o.inc_id) + '">Make receipt</button>';
@@ -2559,7 +2852,17 @@ function drawMoney(){
   var hold = '<table class="hold"><tr><th>Holder</th><th>Collected</th><th>Paid out</th><th>To transfer</th></tr>' + (c.byHolder || []).filter(function(h){ return h.collected || h.paidOut; }).map(function(h){
     return '<tr><td>' + esc(h.holder) + '</td><td>' + rm(h.collected) + '</td><td>' + rm(h.paidOut) + '</td><td>' + (h.studioHeld ? '<span class="sub">studio-held</span>' : '<b>' + rm(h.toTransfer) + '</b>') + '</td></tr>'; }).join('') + '</table>';
   var reb = (c.rebates || []).length ? '<h3 style="margin-top:14px">Rebates · ' + rm(c.rebateTotal) + '</h3>' + c.rebates.map(function(r){ return '<div class="item"><div class="grow"><b>' + esc(r.name) + '</b><br><small>' + fmtD(r.date) + ' · ' + esc(KIND[r.kind] || r.kind) + ' · ' + esc(r.reason || '') + '</small></div><span class="amt" style="color:var(--yellow)">' + rm(r.rebate) + '</span></div>'; }).join('') : '';
-  var close = '<div class="card"><h3>Month close · ' + esc(c.monthLabel || monthLabel(S.moneyYm)) + '</h3><div class="tiles" style="grid-template-columns:1fr 1fr"><div class="tile"><div class="n" style="color:var(--green)">' + rm(c.income) + '</div><div class="label">Income</div></div><div class="tile"><div class="n" style="color:var(--yellow)">' + rm(c.expenses) + '</div><div class="label">Expenses</div></div><div class="tile"><div class="n">' + rm(c.net) + '</div><div class="label">Net</div></div><div class="tile"><div class="n">' + (c.voidedCount || 0) + '</div><div class="label">Voided</div></div></div>' +
+  /* R70 ruling: money = cash received this month; "Plans for this month" beside it (prepaid months arrive before they start) */
+  var cs = c.cash || {}, pl = c.plans || {};
+  var plans = '<h3 style="margin-top:14px">Plans for this month</h3><table class="hold"><tr><td>Plan value (full price)</td><td><b>' + rm(pl.value) + '</b></td></tr><tr><td>Collected for ' + esc(c.monthLabel || '') + '</td><td>' + rm(pl.collected) + '</td></tr>' +
+    '<tr><td>… paid in earlier months (prepaid' + (pl.prepaidMonths ? ', ' + pl.prepaidMonths + ' month' + (pl.prepaidMonths === 1 ? '' : 's') : '') + ')</td><td>' + rm(pl.paidEarlier) + '</td></tr><tr><td>… paid this month</td><td>' + rm(pl.paidThisMonth) + '</td></tr>' +
+    (Number(pl.paidLater) ? '<tr><td>… paid later</td><td>' + rm(pl.paidLater) + '</td></tr>' : '') +
+    '<tr><td>Promotion discounts</td><td style="color:var(--yellow)">' + rm(pl.promoDiscount) + '</td></tr><tr><td>Rebates</td><td style="color:var(--yellow)">' + rm(pl.rebates) + '</td></tr></table>' +
+    ((c.promoLines || []).length ? c.promoLines.map(function(x){ return '<div class="item"><div class="grow"><b>Promo: ' + esc(x.name) + '</b><br><small>' + x.members + ' member' + (x.members === 1 ? '' : 's') + ' this month · collected ' + rm(x.collected) + '</small></div><span class="amt" style="color:var(--yellow)">−' + rm(x.discount) + '</span></div>'; }).join('') : '');
+  var cashCard = '<h3 style="margin-top:14px">Cash received this month</h3><table class="hold"><tr><td>Member payments received</td><td><b>' + rm(cs.total) + '</b></td></tr><tr><td>… for this month</td><td>' + rm(cs.forThisMonth) + '</td></tr>' +
+    '<tr><td>… for later months (paid in advance' + (cs.laterMonths ? ', ' + cs.laterMonths + ' month' + (cs.laterMonths === 1 ? '' : 's') : '') + ')</td><td>' + rm(cs.forLaterMonths) + '</td></tr>' + (Number(cs.forEarlierMonths) ? '<tr><td>… for earlier months</td><td>' + rm(cs.forEarlierMonths) + '</td></tr>' : '') + '</table>';
+  var close = '<div class="card"><h3>Month close · ' + esc(c.monthLabel || monthLabel(S.moneyYm)) + '</h3><p class="sub">Income, net and transfers = cash received this month (payment date).</p><div class="tiles" style="grid-template-columns:1fr 1fr"><div class="tile"><div class="n" style="color:var(--green)">' + rm(c.income) + '</div><div class="label">Income</div></div><div class="tile"><div class="n" style="color:var(--yellow)">' + rm(c.expenses) + '</div><div class="label">Expenses</div></div><div class="tile"><div class="n">' + rm(c.net) + '</div><div class="label">Net</div></div><div class="tile"><div class="n">' + (c.voidedCount || 0) + '</div><div class="label">Voided</div></div></div>' +
+    cashCard + plans +
     '<h3 style="margin-top:14px">Transfers to ' + esc(B.studioBank || 'the studio account') + '</h3>' + tr + '<p class="ph-hint">Studio bank and FIT TNG are already in the studio’s own accounts: nothing to transfer.</p><div style="overflow-x:auto">' + hold + '</div>' + reb +
     '<p style="margin-top:12px"><button class="btn" type="button" data-act="stmt">Make statement PDF</button> <span id="stmtOut"></span></p></div>';
   var today = todayStr(), dflt = (today.slice(0, 7) === S.moneyYm ? today : S.moneyYm + '-01');
@@ -2623,6 +2926,76 @@ function fileToB64(file){
   });
 }
 
+/* ===================== PROMOTIONS (R71): create / edit / end / list with sold counts ===================== */
+var PRM = { list: null, edit: null };
+var PRM_RULES = [{ v: 'any', l: 'Any month' }, { v: 'this month', l: 'This month only' }, { v: 'next month', l: 'Next month only' }];
+ACT.promoOpen = function(){ PRM.edit = null; openDrawer(drawerHead('Promotions', 'Packages Peggy and you can sell in Pay (e.g. 3 months for RM150).') + '<div id="prm_body">' + spin() + '</div>'); loadPromos(); };
+function loadPromos(){ api('partners_promos').then(function(r){ PRM.list = r; drawPromos(); }, handleErr); }
+function promoPill(st){ return '<span class="pill ' + (st === 'On sale' ? 'paid' : st === 'Ended' ? 'grey' : 'unpaid') + '">' + esc(st) + '</span>'; }
+function drawPromos(){
+  if (!$('prm_body')) return;
+  var r = PRM.list || { promos: [] }, f = PRM.edit;
+  var list = (r.promos || []).map(function(x){
+    var win = (x.sellFrom ? 'from ' + fmtD(x.sellFrom) : '') + (x.sellTo ? (x.sellFrom ? ' ' : '') + 'until ' + fmtD(x.sellTo) : '');
+    return '<div class="item"><div class="grow"><b>' + esc(x.name) + '</b> ' + promoPill(x.status) + '<br><small>' + (x.plan === 'UNL' ? 'Unlimited' : 'Standard') + ' × ' + x.months + ' month' + (x.months === 1 ? '' : 's') + ' · ' + esc(x.totalLabel) +
+      ' (normal ' + rm(x.normalTotal) + ') · starts ' + esc(x.firstMonthRule) + (x.maxPerMember ? ' · max ' + x.maxPerMember + ' per member' : '') + (x.birthdayCombines ? ' · + birthday 10%' : '') + (win ? ' · ' + esc(win) : '') +
+      '<br>Sold ' + x.sold + ' · collected ' + rm(x.revenue) + ' · discount ' + rm(x.discount) + (x.note ? ' · ' + esc(x.note) : '') + '</small></div><span class="acts">' +
+      '<button class="btn secondary sm" type="button" data-act="promoEdit" data-v="' + esc(x.promoId) + '">Edit</button>' +
+      (x.active ? '<button class="btn secondary sm" type="button" data-act="promoEnd" data-v="' + esc(x.promoId) + '">End</button>' : '<button class="btn secondary sm" type="button" data-act="promoBack" data-v="' + esc(x.promoId) + '">Sell again</button>') + '</span></div>';
+  }).join('') || '<p class="muted">No promotions yet.</p>';
+  var v = f || { name: '', plan: 'STD', months: 3, total: '', sellFrom: '', sellTo: '', firstMonthRule: 'any', maxPerMember: '', birthdayCombines: false, note: '' };
+  var locked = !!(f && f.sold);
+  var form = '<div class="card"><h3>' + (f ? 'Edit promotion' : 'New promotion') + '</h3>' + (locked ? '<p class="sub">Sold ' + f.sold + ' time' + (f.sold === 1 ? '' : 's') + ': plan, months and price stay as they are (end it and create a new one to change them).</p>' : '') +
+    '<label for="pr_name">Name</label><input id="pr_name" maxlength="80" value="' + esc(v.name) + '" placeholder="3 months for RM150">' +
+    '<div class="f2"><div><label for="pr_plan">Plan</label><select id="pr_plan"' + (locked ? ' disabled' : '') + '>' + opts([{ v: 'STD', l: 'Standard' }, { v: 'UNL', l: 'Unlimited' }], v.plan) + '</select></div>' +
+    '<div><label for="pr_months">Months</label><select id="pr_months"' + (locked ? ' disabled' : '') + '>' + opts([1,2,3,4,5,6,7,8,9,10,11,12], v.months) + '</select></div>' +
+    '<div><label for="pr_total">Total price (RM)</label><input id="pr_total" type="number" min="0" step="0.01" inputmode="decimal" value="' + esc(v.total) + '"' + (locked ? ' disabled' : '') + '></div>' +
+    '<div><label for="pr_rule">First month</label><select id="pr_rule">' + opts(PRM_RULES, v.firstMonthRule) + '</select></div>' +
+    '<div><label for="pr_from">Sell from (blank = now)</label><input id="pr_from" type="date" value="' + esc(v.sellFrom || '') + '"></div>' +
+    '<div><label for="pr_to">Sell until (blank = no end)</label><input id="pr_to" type="date" value="' + esc(v.sellTo || '') + '"></div>' +
+    '<div><label for="pr_max">Max per member (blank = no limit)</label><input id="pr_max" type="number" min="1" max="99" step="1" inputmode="numeric" value="' + esc(v.maxPerMember || '') + '"></div>' +
+    '<div><label for="pr_note">Note</label><input id="pr_note" maxlength="200" value="' + esc(v.note || '') + '"></div></div>' +
+    '<label style="display:flex;gap:10px;align-items:center;margin-top:10px"><input type="checkbox" id="pr_bday"' + (v.birthdayCombines ? ' checked' : '') + ' style="width:auto"> Birthday month also gets 10% off (combine)</label>' +
+    '<p class="sub" id="pr_hint"></p><p><button class="btn good" type="button" data-act="promoSave">' + (f ? 'Save changes' : 'Create promotion') + '</button>' + (f ? ' <button class="btn secondary" type="button" data-act="promoNew">Cancel</button>' : '') + '</p></div>';
+  $('prm_body').innerHTML = form + '<div class="card"><h3>All promotions</h3>' + list + '</div>';
+  promoHint();
+}
+function promoHint(){
+  var el = $('pr_hint'); if (!el) return;
+  var pr = (PRM.list || {}).prices || {}, plan = val('pr_plan'), n = Number(val('pr_months')) || 0, tot = Number(val('pr_total')) || 0;
+  var normal = (plan === 'UNL' ? Number(pr.unl) : Number(pr.std)) * n;
+  if (!tot || !n) { el.textContent = ''; return; }
+  var share = Engine.splitSen(Engine.toSen(tot), n).map(function(x){ return Engine.fmtRM(Engine.fromSen(x)); });
+  el.textContent = 'Normal price ' + Engine.fmtRM(normal) + ' · discount ' + Engine.fmtRM(Math.max(0, normal - tot)) + ' · per month ' + share.join(' + ') + (tot > normal ? ' — more than the normal price!' : '');
+}
+INP.pr_total = promoHint; CHG.pr_plan = promoHint; CHG.pr_months = promoHint;
+ACT.promoNew = function(){ PRM.edit = null; drawPromos(); };
+ACT.promoEdit = function(b, v){ PRM.edit = ((PRM.list || {}).promos || []).filter(function(x){ return x.promoId === v; })[0] || null; drawPromos(); $('panel').scrollTop = 0; };
+function promoUndo(msg, res, id){
+  var back = res.created ? { promoId: res.promo.promoId, active: false } : res.before && Object.keys(res.before).length ? Object.assign({ promoId: id }, res.before) : null;
+  if (!back) { toast(msg); return; }
+  FDAEdit.undoToast(msg, function(){ back.requestId = rid(); run(W('partners_savePromo', back), 'Undone ✓').then(function(){ loadPromos(); }); });
+}
+ACT.promoSave = function(b){
+  var f = PRM.edit, p = { name: val('pr_name'), firstMonthRule: val('pr_rule'), sellFrom: val('pr_from'), sellTo: val('pr_to'), maxPerMember: val('pr_max'), birthdayCombines: !!($('pr_bday') && $('pr_bday').checked), note: val('pr_note'), requestId: rid() };
+  if (!f || !f.sold) { p.plan = val('pr_plan'); p.months = Number(val('pr_months')); p.total = Number(val('pr_total')); }
+  if (f) p.promoId = f.promoId;
+  b.disabled = true;
+  api('partners_savePromo', p).then(function(r){
+    b.disabled = false;
+    if (!r || r.error) { toast((r && r.error) || 'Not saved', true); return; }
+    PRM.edit = null; promoUndo(f ? 'Promotion saved' : 'Promotion created', r, p.promoId); loadPromos();
+  }, function(e){ b.disabled = false; handleErr(e); });
+};
+function promoActive(id, on){
+  api('partners_savePromo', { promoId: id, active: on, requestId: rid() }).then(function(r){
+    if (!r || r.error) { toast((r && r.error) || 'Not saved', true); return; }
+    promoUndo(on ? 'Back on sale' : 'Promotion ended', r, id); loadPromos();
+  }, handleErr);
+}
+ACT.promoEnd = function(b, v){ promoActive(v, false); };
+ACT.promoBack = function(b, v){ promoActive(v, true); };
+
 /* ===================== DASHBOARD + monthly report (R46) ===================== */
 VIEWS.dash = function(){
   $main.innerHTML = '<div class="bar">' + monthBar('dm', S.dashYm).replace(/^<div class="bar">|<\/div>$/g, '') + '<button class="btn" type="button" data-act="report">Monthly report</button><span id="repOut"></span></div><div id="dbody"></div>';
@@ -2641,7 +3014,10 @@ function drawDash(){
   var bars = wk.map(function(w){ return '<div class="b"><span class="d">' + w.day + '</span><i style="width:' + Math.max(2, Math.round(w.avg / mx * 100)) + '%;max-width:calc(100% - 150px)"></i><em>' + w.avg + ' avg · ' + w.classes + ' class' + (w.classes === 1 ? '' : 'es') + '</em></div>'; }).join('');
   var lb = (d.leaderboard || []).map(function(x, i){ return '<div class="item"><span class="big" style="color:var(--pink);width:34px">' + (i + 1) + '</span><b class="grow">' + esc(x.name) + ' <small>' + esc(x.code) + '</small></b><span class="amt">' + x.visits + '</span></div>'; }).join('');
   $('dbody').innerHTML = '<div class="tiles"><div class="tile"><div class="n" style="color:var(--green)">' + rm(d.revenue) + '</div><div class="label">Revenue</div></div><div class="tile"><div class="n" style="color:var(--cyan)">' + d.payingMembers + '</div><div class="label">Paying members</div></div><div class="tile"><div class="n" style="color:var(--purple)">' + d.newMembers + '</div><div class="label">New members</div></div><div class="tile"><div class="n">' + rm(d.net) + '</div><div class="label">Net after ' + rm(d.expenses) + '</div></div></div>' +
+    '<p class="sub">Revenue = cash received this month' + (Number(d.paidAhead) ? ' (incl. ' + rm(d.paidAhead) + ' paid ahead for later months)' : '') + '. Plans for this month: ' + rm((d.plans || {}).value) +
+      (Number((d.plans || {}).prepaid) ? ', of which ' + rm(d.plans.prepaid) + ' prepaid earlier (' + d.plans.prepaidMonths + ' month' + (d.plans.prepaidMonths === 1 ? '' : 's') + ')' : '') + '.</p>' +
     (Number(d.rebates) > 0 ? '<p class="sub">Rebates given: ' + rm(d.rebates) + ' (not in revenue).</p>' : '') +
+    (Number(d.promoDiscount) > 0 ? '<p class="sub">Promotion discounts: ' + rm(d.promoDiscount) + ' (not in revenue).</p>' : '') +
     '<div class="cols two" style="margin-top:12px"><div class="card"><h3>Average per class</h3><div class="bars">' + (bars || '<p class="muted">No check-ins yet.</p>') + '</div></div><div class="card"><h3>Leaderboard · ' + esc(d.monthLabel || '') + '</h3>' + (lb || '<p class="muted">No visits yet.</p>') + '</div>' +
     '<div class="card"><h3>Lapsed</h3><p class="sub">Paid last month, not this month.</p>' + ((d.lapsed || []).map(function(x){ return '<div class="item"><b class="grow">' + esc(x.name) + '</b><small>' + esc(x.code) + '</small><button class="btn secondary sm" type="button" data-act="payOpen" data-v="' + esc(x.code) + '">Pay</button></div>'; }).join('') || '<p class="muted">Nobody.</p>') + '</div>' +
     '<div class="card"><h3>Birthdays</h3>' + ((d.birthdays || []).map(function(x){ return '<div class="item"><b class="grow">' + esc(x.name) + '</b><small>' + (x.day ? x.day + ' ' + PL.monthShort(S.dashYm) : '') + '</small></div>'; }).join('') || '<p class="muted">None this month.</p>') + '</div></div>';
@@ -2798,7 +3174,16 @@ function pmenuHtml(it){
     if (!acts.length) h += '<p class="ehint">' + (it.status === 'Pending' ? 'Only ' + esc(it.requested_by) + ' (who asked) can withdraw it.' : 'Nothing to change: this request is ' + esc(it.status) + '.') + '</p>';
     return h + btns(acts.concat([eb('close', 'Close')])) + '</div>';
   }
-  if (gone(it)) return h + '<p class="ehint">' + ptag(it.row || it) + '</p>' + btns([eb('restore', 'Restore', ''), eb('close', 'Close')]) + '</div>';
+  var bid = pBundle(it);
+  if (gone(it)) return h + '<p class="ehint">' + ptag(it.row || it) + '</p>' + btns([eb('restore', bid ? 'Restore whole bundle' : 'Restore', ''), eb('close', 'Close')]) + '</div>';
+  if (bid) { /* R72: a month of a payment in advance is never edited alone: the whole bundle, or delete */
+    var bm = FDAEdit.bundleMonths(local('payments'), bid);
+    if (m === 'delete') return h + '<p class="ehint">Deletes every month of this payment from ' + esc(monthLabel(todayStr().slice(0, 7))) + ' on (' + esc(bm) + '). Months already over stay paid.</p>' + FDAEdit.reasonBox('pmWhy') + '<div class="eerr" id="pmErr"></div>' + btns([eb('delGo', 'Delete whole bundle', 'del'), eb('close', 'Keep')]) + '</div>';
+    if (m === 'editBundle') { var br = pBundleRow(it);
+      return h + '<p class="ehint">' + esc(bm) + '. The plan, months and price can’t change: delete it and record a new one.</p><div class="erow"><div><label for="pbM">Method</label><select id="pbM">' + opts((S.boot || {}).methods || ['Cash'], br.method) + '</select></div><div><label for="pbB">Received by</label><select id="pbB">' + opts((S.boot || {}).holders || [S.actor], br.received_by || S.actor) + '</select></div></div>' +
+        (br.receipt_no ? '<p class="ehint">Receipt ' + esc(br.receipt_no) + ' will be voided. Make a new one after saving.</p>' : '') + '<div class="eerr" id="pmErr"></div>' + btns([eb('bundleGo', 'Save for every month', ''), eb('close', 'Cancel')]) + '</div>'; }
+    return h + '<p class="ehint">Paid ahead together: ' + esc(bm) + '. Change or delete the whole bundle.</p>' + btns([eb('editBundle', 'Edit whole bundle'), eb('delete', 'Delete', 'del'), eb('close', 'Close')]) + '</div>';
+  }
   if (m === 'delete') return h + FDAEdit.reasonBox('pmWhy') + '<div class="eerr" id="pmErr"></div>' + btns([eb('delGo', 'Delete' + (it.guest ? ' guest + payment' : ''), 'del'), eb('close', 'Keep')]) + '</div>';
   if (m === 'move') {
     var ks = {}, o = '';
@@ -2822,6 +3207,9 @@ function pmenuHtml(it){
   a.push(eb('delete', 'Delete', 'del')); a.push(eb('close', 'Close'));
   return h + btns(a) + '</div>';
 }
+/* R72: the bundle id of a payment item ('' = a normal payment), from the row or the phone's copy */
+function pBundleRow(it){ var lp = ((S.store && S.store.get('payments')) || {})[it.id]; return Object.assign({}, it.row || {}, lp || {}); }
+function pBundle(it){ return it && it.kind === 'pay' && !it.guest ? FDAEdit.bundleOf(pBundleRow(it)) : ''; }
 function calClasses(){ var out = []; ((S.cal || {}).days || []).forEach(function(d){ (d.sessions || []).forEach(function(x){ if (!x.cancelled && x.classKey <= todayStr() + ' 23:59') out.push({ classKey: x.classKey, label: classLabel(x.classKey) }); }); }); return out.reverse(); }
 function stampRow(row, extra){ return Object.assign({}, row, { edited_by: S.actor, edited_at: new Date().toISOString() }, extra || {}); }
 function pType(it){ return it.kind === 'inc' ? 'income' : it.kind === 'exp' ? 'expense' : it.guest ? 'guest' : it.kind === 'att' ? 'checkin' : 'payment'; }
@@ -2829,8 +3217,13 @@ ACT.pmDo = function(b, a){
   var it = PITEMS[PEM.key]; if (!it) return;
   var err = function(t){ var x = $('pmErr'); if (x) x.textContent = t; else toast(t, true); };
   if (a === 'close') { closeMenus(); PEM = { key: '', mode: '' }; return; }
-  if (['delete', 'move', 'editGuest', 'editPay', 'editInc', 'editExp'].indexOf(a) >= 0) { PEM.mode = a; if (a === 'editPay') PPE = null; drawPmenu(); return; }
-  var type = pType(it);
+  if (['delete', 'move', 'editGuest', 'editPay', 'editInc', 'editExp', 'editBundle'].indexOf(a) >= 0) { PEM.mode = a; if (a === 'editPay') PPE = null; drawPmenu(); return; }
+  var type = pType(it), bid = pBundle(it), bst = function(r, x){ return stampRow(r, x); };
+  if (bid && a === 'delGo') { var bw = val('pmWhy').trim(); if (!bw) return err('Please type why.');
+    pchange({ type: 'bundle', action: 'delete', id: bid, reason: bw }, { patches: FDAEdit.bundlePatches(local('payments'), bid, 'delete', todayStr().slice(0, 7), { why: bw }, bst) }); return; }
+  if (bid && a === 'restore') { pchange({ type: 'bundle', action: 'restore', id: bid }, { patches: FDAEdit.bundlePatches(local('payments'), bid, 'restore', todayStr().slice(0, 7), null, bst) }); return; }
+  if (bid && a === 'bundleGo') { var bmth = val('pbM'), bby = val('pbB');
+    pchange({ type: 'bundle', action: 'edit', id: bid, patch: { method: bmth, receivedBy: bby } }, { patches: FDAEdit.bundlePatches(local('payments'), bid, 'edit', todayStr().slice(0, 7), { method: bmth, received_by: bby }, bst) }); return; }
   if (a === 'delGo') { var why = val('pmWhy').trim(); if (!why) return err('Please type why.'); pchange({ type: type, action: 'delete', id: it.id, reason: why }, { patches: pDelPatches(it, why) }); return; }
   if (a === 'restore') { pchange({ type: type, action: 'restore', id: it.id }, { patches: pRestorePatches(it) }); return; }
   if (a === 'moveGo') { var to = val('pmTo'); if (!to) return err('Pick a class.'); var lr = (S.store && S.store.get('attendance') || {})[it.id];
@@ -2866,7 +3259,7 @@ function pRestorePatches(it){
 function pchange(req, o){
   o = o || {};
   var label = (req.action === 'delete' ? 'Delete ' : req.action === 'restore' ? 'Restore ' : 'Edit ') + req.type;
-  var r = S.store.write('partners_change', function(id){ req.requestId = id; return [req]; }, { label: label, patches: o.patches || null, meta: { type: req.type, action: req.action, id: req.id, undo: !!o.undo } });
+  var r = S.store.write('partners_change', function(id){ req.requestId = id; return [req]; }, { label: label, patches: o.patches || null, meta: { type: req.type, action: req.action, id: req.id, undo: !!o.undo, req: Object.assign({}, req) } });
   closeMenus(); PEM = { key: '', mode: '' };
   if (o.undo) toast('Undone ✓');
   else FDAEdit.undoToast(req.action === 'delete' ? 'Deleted' : req.action === 'restore' ? 'Restored' : 'Saved', function(){ pundo(r, function(res){ return pinverse(req, res); }); });
@@ -2889,7 +3282,12 @@ function pundo(r, undoOf){
 }
 function onChangeResult(res, entry){
   var undo = entry.meta && entry.meta.undo;
-  if (FDAEdit.failed(res)) { FDAEdit.hideToast(); toast((undo ? 'Undo not done: ' : 'Not saved: ') + ((res && res.error) || ''), true); }
+  if (res && res.needsConfirm && entry.meta && entry.meta.req) { /* R70: a used month of a payment in advance: ask, then send again with force */
+    var again = Object.assign({}, entry.meta.req, { force: true }); delete again.requestId;
+    FDAEdit.hideToast(); /* nothing was deleted yet: its "Deleted · Undo" goes, the question takes its place */
+    FDAEdit.confirmBar(res.error, 'Delete anyway', function(){ pchange(again); });
+  }
+  else if (FDAEdit.failed(res)) { FDAEdit.hideToast(); toast((undo ? 'Undo not done: ' : 'Not saved: ') + ((res && res.error) || ''), true); }
   else if (res.receiptVoided || res.warning) toast([res.receiptVoided ? 'Receipt ' + res.receiptVoided + ' voided. Make a new one if needed.' : '', res.warning || ''].join(' ').trim(), !!res.warning);
   afterChange();
 }

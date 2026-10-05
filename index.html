@@ -248,6 +248,7 @@ function cardHtml(c){
   h+='<div class="qrbox"><canvas id="qr" width="560" height="560" role="img" aria-label="My QR code"></canvas></div>';
   h+='<p class="muted" style="margin:4px 0 12px;font-size:14px">Screenshot this and show it at the door.<br>截图保存，上课时出示即可。</p>';
   h+='<div class="kv"><span>Plan this month</span><b id="kvPlan">'+esc(c.planLabel)+'</b></div>';
+  if(c.paidUntil)h+='<div class="kv"><span>Paid until</span><b>'+esc(c.paidUntil)+'</b></div>'; /* R70: a month label only */
   h+='<div class="kv"><span>Classes attended'+(c.monthLabel?' ('+esc(c.monthLabel)+')':' this month')+'</span><b id="kvAtt">'+esc(c.attendedThisMonth)+'</b></div>';
   if(c.window && !c.window.open && c.window.nextClassLabel) h+='<div class="kv"><span>Next class</span><b>'+esc(c.window.nextClassLabel)+'</b></div>';
   h+='</div>';

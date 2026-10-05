@@ -11,12 +11,35 @@
 <link rel="apple-touch-icon" href="../icons/icon-180.png">
 <link rel="icon" type="image/png" sizes="32x32" href="../icons/icon-32.png">
 <style>
-html,body{margin:0;height:100%;background:#0b0a0f;color:#f6f6f6;font:16px system-ui,sans-serif}
-iframe{position:fixed;inset:0;width:100%;height:100%;border:0;padding-top:env(safe-area-inset-top);box-sizing:border-box;background:#0b0a0f}
-#none{padding:40px 24px;text-align:center} #none img{width:96px;border-radius:16px}
+:root{--bg:#0b0a0f;--ink:#f6f6f6;--muted:#a8a3b5;--pink:#f8177f;--line:#2e2a38}
+html,body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}
+.stripe{height:6px;background:linear-gradient(115deg,#f8177f 0 25%,#895cff 25% 50%,#39cbf0 50% 75%,#ffe047 75%)}
+main{max-width:440px;margin:0 auto;padding:28px 16px 40px;display:grid;gap:18px;text-align:center}
+img.logo{width:96px;height:96px;border-radius:20px;justify-self:center}
+h1{margin:0;font-size:24px;letter-spacing:.04em}
+.zh{color:var(--muted);margin-top:-12px}
+a.btn{display:block;background:var(--pink);color:#fff;text-decoration:none;font-weight:700;padding:15px;border-radius:12px;font-size:18px}
+.how{text-align:left;border:1px solid var(--line);border-radius:14px;padding:14px 16px;display:grid;gap:10px;font-size:15px}
+.how b{color:#fff} .how p{margin:0;color:var(--muted)}
+#none{color:var(--muted)}
 </style></head><body>
-<iframe id="frame" title="FIT Check-in (Peggy)" allow="clipboard-write"></iframe>
-<div id="none" hidden><img src="../icons/icon-192.png" alt="FIT Dance Academy"><p>Please open your personal FIT Dance link from WhatsApp once.<br>请先从 WhatsApp 打开你的专属链接一次。</p></div>
-<script>var DOOR="https://script.google.com/macros/s/AKfycbxDQG-e_sMUr8fYg9NZgUc13STtl1pJ01DpWMI0AWWAHq4i9cCa40Vwm1RhOaPstGzr/exec",frame=document.getElementById('frame');
-frame.src=DOOR+'?app=staff';</script>
+<div class="stripe"></div>
+<main>
+<img class="logo" src="../icons/icon-192.png" alt="FIT Dance Academy">
+<h1>Peggy’s check-in console</h1><div class="zh">前台签到</div>
+<a class="btn" id="open" href="#">Open · 打开</a>
+<p id="none" hidden>Please open your personal FIT Dance link from WhatsApp once.<br>请先从 WhatsApp 打开你的专属链接一次。</p>
+<div class="how">
+<div><b>Add the FIT icon to your home screen · 添加到主屏幕</b></div>
+<p><b>iPhone (Safari):</b> tap Share <span aria-hidden="true">⬆︎</span> → Add to Home Screen → Add.<br>点 分享 → 添加到主屏幕。</p>
+<p><b>Android (Chrome):</b> tap ⋮ → Add to Home screen (or Install app) → Add.<br>点 ⋮ → 添加到主屏幕。</p>
+<p>Then always open it from the FIT icon. · 以后从 FIT 图标打开。</p>
+</div>
+</main>
+<script>var DOOR="https://script.google.com/macros/s/AKfycbxDQG-e_sMUr8fYg9NZgUc13STtl1pJ01DpWMI0AWWAHq4i9cCa40Vwm1RhOaPstGzr/exec";
+var standalone=(window.matchMedia&&matchMedia('(display-mode: standalone)').matches)||navigator.standalone===true;
+var URL_=DOOR+'?app=staff'; var GO=standalone;
+if(URL_){document.getElementById('open').href=URL_; if(GO) location.replace(URL_);}
+else{document.getElementById('open').hidden=true;document.getElementById('none').hidden=false;}
+</script>
 </body></html>

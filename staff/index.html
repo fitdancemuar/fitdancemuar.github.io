@@ -700,6 +700,11 @@ var Engine = (function () {
     return out;
   }
 
+  // ---------- R73: paid before go-live ----------
+  /** Method, holder and rebate reason of a month paid before the system existed (amount 0, rebate = the month's value). */
+  var PREPAID_GOLIVE = 'Before go-live';
+  function isPrepaidGoLive(p) { return !!p && String(p.received_by) === PREPAID_GOLIVE && String(p.method) === PREPAID_GOLIVE; }
+
   // ---------- month close ----------
   function monthClose(a) {
     var holders = (a.holders || []).slice();
@@ -860,7 +865,7 @@ var Engine = (function () {
     planMonth: planMonth, shownResult: shownResult, monthRange: monthRange, sessionStartMs: startMs, sessionEndMs: endMs, weekStart: weekStart, weekIndex: weekIndex, addDays: addDays, classStart: classStart,
     checkIn: checkIn, paymentOptions: paymentOptions, isImported: isImported,
     ADV_MAX_MONTHS: ADV_MAX_MONTHS, addMonths: addMonths, splitSen: splitSen, monthShort: monthShort, advancePlan: advancePlan,
-    monthClose: monthClose,
+    monthClose: monthClose, PREPAID_GOLIVE: PREPAID_GOLIVE, isPrepaidGoLive: isPrepaidGoLive,
     parseFormOption: parseFormOption, birthdayFromIC: birthdayFromIC, parseDob: parseDob,
     normName: normName, healthNote: healthNote, mapRegistrationHeaders: mapRegistrationHeaders,
     fill: fill, waLink: waLink, base62FromUuids: base62FromUuids
@@ -1470,10 +1475,28 @@ if (typeof module !== 'undefined') module.exports = Engine;
     var have = {}; (paidMonths || []).forEach(function (m) { have[m] = true; });
     return ((q && q.months) || []).filter(function (m) { return have[m]; });
   }
+  /** R73 "Already paid before go-live": the same months at RM0 collected, the month's value as rebate (as the server writes them) */
+  function prepaid(q) {
+    if (!q || q.error) return q;
+    var out = JSON.parse(JSON.stringify(q));
+    out.lines.forEach(function (l) { l.amount = 0; l.rebate = l.value; });
+    out.total = 0; out.prepaid = true;
+    return out;
+  }
   /** the price breakdown table: one line per month, the promotion discount, the total */
   function breakdown(q, promo, paidMonths) {
     var E = root.Engine;
     if (!q || q.error) return '<div class="adv-warn">' + esc((q && q.error) || 'Choose a plan and months.') + '</div>';
+    if (q.prepaid) { // R73: months covered, their value, RM0 collected now
+      var plan0 = q.plan === 'UNL' ? 'Unlimited' : 'Standard', clash0 = clashes(q, paidMonths), t = '<table class="adv-bd">';
+      q.lines.forEach(function (l) {
+        t += '<tr><td>' + esc(monthLabel(l.month)) + ' <small>' + plan0 + (l.birthday ? ' · 🎂 10% off' : '') + (clash0.indexOf(l.month) >= 0 ? ' · <b style="color:var(--pink)">already paid</b>' : ' · paid before go-live') + '</small></td><td class="n">' + E.fmtRM(l.value) + '</td></tr>';
+      });
+      t += '<tr class="disc"><td>Paid before go-live</td><td class="n">−' + E.fmtRM(q.value) + '</td></tr>';
+      t += '<tr class="tot"><td>Collected now · covers ' + esc(monthsShort(q.months)) + '</td><td class="n">' + E.fmtRM(0) + '</td></tr></table>';
+      if (clash0.length) t += '<div class="adv-warn">Already paid: ' + esc(clash0.map(monthLabel).join(', ')) + '. Choose a later first month or fewer months.</div>';
+      return t;
+    }
     var plan = q.plan === 'UNL' ? 'Unlimited' : 'Standard', h = '<table class="adv-bd">', clash = clashes(q, paidMonths);
     q.lines.forEach(function (l) {
       var price = promo ? l.value : l.amount;
@@ -1497,7 +1520,7 @@ if (typeof module !== 'undefined') module.exports = Engine;
         void: false, ts: ts, bundle_id: 'B' + id, promo_id: promo ? promo.promoId : '' };
     });
   }
-  root.FDAAdv = { onSale: onSale, starts: starts, quote: quote, clashes: clashes, breakdown: breakdown, monthLabel: monthLabel, monthsShort: monthsShort, localRows: localRows };
+  root.FDAAdv = { prepaid: prepaid, onSale: onSale, starts: starts, quote: quote, clashes: clashes, breakdown: breakdown, monthLabel: monthLabel, monthsShort: monthsShort, localRows: localRows };
 })(typeof window !== 'undefined' ? window : globalThis);
 </script>
 
@@ -1574,7 +1597,7 @@ function statusLine(code){var ym=ymNow(),c=st.get('coverage')[code+'|'+ym],v=vis
 function money(dayOrMonth){ // {total, byMethod, byHolder} by payment date
   var out={total:0,byMethod:{},byHolder:{}};
   methods().forEach(function(m){out.byMethod[m]=0;});
-  pays().forEach(function(p){ if(p.void)return; var d=tsDate(p.ts); if(d.slice(0,dayOrMonth.length)!==dayOrMonth)return;
+  pays().forEach(function(p){ if(p.void||Engine.isPrepaidGoLive(p))return; var d=tsDate(p.ts); if(d.slice(0,dayOrMonth.length)!==dayOrMonth)return;
     var a=Number(p.amount)||0; out.total+=a; out.byMethod[p.method]=(out.byMethod[p.method]||0)+a; out.byHolder[p.received_by]=(out.byHolder[p.received_by]||0)+a; });
   return out;
 }
@@ -2315,7 +2338,7 @@ function payRowsHtml(list,prefix){
   var h='';
   list.sort(function(a,b){return String(a.ts)<String(b.ts)?1:-1;}).forEach(function(p){
     var it=payItem(p), key=prefix+p.pay_id; ITEMS[key]=it;
-    h+='<div class="person'+(p.void?' voided':'')+(p._local?' pending':'')+'" style="flex-wrap:wrap"><div class="who"><b>'+esc(it.name)+'</b><small class="vx">'+esc(KINDL[p.kind]||p.kind)+(p.month&&p.month!==ymNow()?' · for '+esc(monthLabel(p.month)):'')+(p.bundle_id?' · paid ahead':'')+' · '+rm(p.amount)+(Number(p.rebate)>0?' ('+(p.promo_id?'promo ':'rebate ')+rm(p.rebate)+')':'')+' · '+esc(p.method)+' · '+esc(p.received_by)+' · '+esc(tsTime(p.ts))+(tsDate(p.ts)!==Engine.dateStr(now())?' '+esc(Engine.fmtDate(tsDate(p.ts))):'')+'</small>'+FDAEdit.tag(p)+'</div>'+(p._local?'':moreBtn(key))+menuHtml(key,it)+'</div>';
+    h+='<div class="person'+(p.void?' voided':'')+(p._local?' pending':'')+'" style="flex-wrap:wrap"><div class="who"><b>'+esc(it.name)+'</b><small class="vx">'+esc(KINDL[p.kind]||p.kind)+(p.month&&p.month!==ymNow()?' · for '+esc(monthLabel(p.month)):'')+(p.bundle_id?' · paid ahead':'')+' · '+rm(p.amount)+(Number(p.rebate)>0?' ('+(Engine.isPrepaidGoLive(p)?'paid before go-live ':p.promo_id?'promo ':'rebate ')+rm(p.rebate)+')':'')+' · '+esc(p.method)+' · '+esc(p.received_by)+' · '+esc(tsTime(p.ts))+(tsDate(p.ts)!==Engine.dateStr(now())?' '+esc(Engine.fmtDate(tsDate(p.ts))):'')+'</small>'+FDAEdit.tag(p)+'</div>'+(p._local?'':moreBtn(key))+menuHtml(key,it)+'</div>';
   });
   return h;
 }

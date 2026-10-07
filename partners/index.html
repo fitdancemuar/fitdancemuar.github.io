@@ -748,6 +748,11 @@ var Engine = (function () {
     return out;
   }
 
+  // ---------- R73: paid before go-live ----------
+  /** Method, holder and rebate reason of a month paid before the system existed (amount 0, rebate = the month's value). */
+  var PREPAID_GOLIVE = 'Before go-live';
+  function isPrepaidGoLive(p) { return !!p && String(p.received_by) === PREPAID_GOLIVE && String(p.method) === PREPAID_GOLIVE; }
+
   // ---------- month close ----------
   function monthClose(a) {
     var holders = (a.holders || []).slice();
@@ -908,7 +913,7 @@ var Engine = (function () {
     planMonth: planMonth, shownResult: shownResult, monthRange: monthRange, sessionStartMs: startMs, sessionEndMs: endMs, weekStart: weekStart, weekIndex: weekIndex, addDays: addDays, classStart: classStart,
     checkIn: checkIn, paymentOptions: paymentOptions, isImported: isImported,
     ADV_MAX_MONTHS: ADV_MAX_MONTHS, addMonths: addMonths, splitSen: splitSen, monthShort: monthShort, advancePlan: advancePlan,
-    monthClose: monthClose,
+    monthClose: monthClose, PREPAID_GOLIVE: PREPAID_GOLIVE, isPrepaidGoLive: isPrepaidGoLive,
     parseFormOption: parseFormOption, birthdayFromIC: birthdayFromIC, parseDob: parseDob,
     normName: normName, healthNote: healthNote, mapRegistrationHeaders: mapRegistrationHeaders,
     fill: fill, waLink: waLink, base62FromUuids: base62FromUuids
@@ -1518,10 +1523,28 @@ if (typeof module !== 'undefined') module.exports = Engine;
     var have = {}; (paidMonths || []).forEach(function (m) { have[m] = true; });
     return ((q && q.months) || []).filter(function (m) { return have[m]; });
   }
+  /** R73 "Already paid before go-live": the same months at RM0 collected, the month's value as rebate (as the server writes them) */
+  function prepaid(q) {
+    if (!q || q.error) return q;
+    var out = JSON.parse(JSON.stringify(q));
+    out.lines.forEach(function (l) { l.amount = 0; l.rebate = l.value; });
+    out.total = 0; out.prepaid = true;
+    return out;
+  }
   /** the price breakdown table: one line per month, the promotion discount, the total */
   function breakdown(q, promo, paidMonths) {
     var E = root.Engine;
     if (!q || q.error) return '<div class="adv-warn">' + esc((q && q.error) || 'Choose a plan and months.') + '</div>';
+    if (q.prepaid) { // R73: months covered, their value, RM0 collected now
+      var plan0 = q.plan === 'UNL' ? 'Unlimited' : 'Standard', clash0 = clashes(q, paidMonths), t = '<table class="adv-bd">';
+      q.lines.forEach(function (l) {
+        t += '<tr><td>' + esc(monthLabel(l.month)) + ' <small>' + plan0 + (l.birthday ? ' · 🎂 10% off' : '') + (clash0.indexOf(l.month) >= 0 ? ' · <b style="color:var(--pink)">already paid</b>' : ' · paid before go-live') + '</small></td><td class="n">' + E.fmtRM(l.value) + '</td></tr>';
+      });
+      t += '<tr class="disc"><td>Paid before go-live</td><td class="n">−' + E.fmtRM(q.value) + '</td></tr>';
+      t += '<tr class="tot"><td>Collected now · covers ' + esc(monthsShort(q.months)) + '</td><td class="n">' + E.fmtRM(0) + '</td></tr></table>';
+      if (clash0.length) t += '<div class="adv-warn">Already paid: ' + esc(clash0.map(monthLabel).join(', ')) + '. Choose a later first month or fewer months.</div>';
+      return t;
+    }
     var plan = q.plan === 'UNL' ? 'Unlimited' : 'Standard', h = '<table class="adv-bd">', clash = clashes(q, paidMonths);
     q.lines.forEach(function (l) {
       var price = promo ? l.value : l.amount;
@@ -1545,7 +1568,7 @@ if (typeof module !== 'undefined') module.exports = Engine;
         void: false, ts: ts, bundle_id: 'B' + id, promo_id: promo ? promo.promoId : '' };
     });
   }
-  root.FDAAdv = { onSale: onSale, starts: starts, quote: quote, clashes: clashes, breakdown: breakdown, monthLabel: monthLabel, monthsShort: monthsShort, localRows: localRows };
+  root.FDAAdv = { prepaid: prepaid, onSale: onSale, starts: starts, quote: quote, clashes: clashes, breakdown: breakdown, monthLabel: monthLabel, monthsShort: monthsShort, localRows: localRows };
 })(typeof window !== 'undefined' ? window : globalThis);
 </script>
 
@@ -1608,6 +1631,7 @@ var PL = (function () {
     t.collectedToday = t.collectedToday || { total: 0, byMethod: {}, byHolder: {} };
     t.collectedMonth = t.collectedMonth || { total: 0, byMethod: {}, byHolder: {} };
     (pendingPays || []).forEach(function (p) {
+      if (p.method === 'Before go-live' && p.received_by === 'Before go-live') return; // refute R73: RM0, not a collection
       var amt = Number(p.amount) || 0;
       function add(o) { o.total = (sen(o.total) + sen(amt)) / 100; o.byMethod[p.method] = (sen(o.byMethod[p.method]) + sen(amt)) / 100; o.byHolder[p.received_by] = (sen(o.byHolder[p.received_by]) + sen(amt)) / 100; }
       if (!p.date || p.date === today) add(t.collectedToday);
@@ -2278,7 +2302,7 @@ function localPayCtx(code, month){
 }
 function openPay(code, target, month){
   month = month || S.ym;
-  PAY = { code: code, target: target, month: month, rid: '', sel: -1, method: 'Cash', holder: S.actor, ctx: localPayCtx(code, month), done: null, mode: 'now', adv: { promoId: '', plan: 'STD', months: 3, start: '' } };
+  PAY = { code: code, target: target, month: month, rid: '', sel: -1, method: 'Cash', holder: S.actor, ctx: localPayCtx(code, month), done: null, mode: 'now', adv: { promoId: '', plan: 'STD', months: 3, start: '', pre: false } };
   if (target === 'dr_pay') openDrawer(drawerHead('Record payment') + '<div id="dr_pay">' + payHtml() + '</div>');
   else if ($(target)) $(target).innerHTML = payHtml();
   var mine = PAY;
@@ -2306,7 +2330,7 @@ function payHtml(){
     var r = P.done;
     return '<div class="card"><div class="status paid" style="margin:0 0 10px"><div class="who2">' + esc(r.name || '') + '</div><div class="word">PAID</div><div class="sub">' + esc(r.amountLabel) + (r.rebateLabel && r.rebateLabel !== 'RM0.00' ? ' · rebate ' + esc(r.rebateLabel) : '') +
       (r.monthsLabel ? '<br>' + (r.promoName ? esc(r.promoName) + ' · ' : '') + esc(r.monthsLabel) : '') + '</div></div>' +
-      (r.payId ? '<div class="bar"><button class="btn secondary sm" type="button" data-act="payReceipt" data-id="' + esc(r.payId) + '">Make receipt</button><span id="pay_rcpt"></span></div>' : '') + '</div>';
+      (r.prepaid ? '<p class="sub">Paid before go-live · no money collected now · no receipt.</p>' : r.payId ? '<div class="bar"><button class="btn secondary sm" type="button" data-act="payReceipt" data-id="' + esc(r.payId) + '">Make receipt</button><span id="pay_rcpt"></span></div>' : '') + '</div>';
   }
   var c = P.ctx, B = S.boot || {};
   if (!c) return '<div class="card">' + (P.err ? '<div class="error">' + esc(P.err) + '</div>' : spin()) + '</div>';
@@ -2335,13 +2359,24 @@ function advPaid(){ var a = advA(); if (a) return a.paidMonths || []; var o = {}
 function advQuote(){
   var A = PAY.adv, pr = advPromo(), st = FDAAdv.starts(pr, S.ym), m = memberLocal(PAY.code) || {}, set = settingsLocal();
   if (!A.start || st.indexOf(A.start) < 0) { var paid = advPaid(); A.start = st.filter(function(x){ return paid.indexOf(x) < 0; })[0] || st[0]; }
-  return FDAAdv.quote({ member: { code: PAY.code, bday_month: m.bday_month }, plan: pr ? pr.plan : A.plan, months: pr ? pr.months : A.months, start: A.start, promo: pr, settings: set ? PL.engineSettings(set) : {} });
+  var q = FDAAdv.quote({ member: { code: PAY.code, bday_month: m.bday_month }, plan: pr ? pr.plan : A.plan, months: pr ? pr.months : A.months, start: A.start, promo: pr, settings: set ? PL.engineSettings(set) : {} });
+  return A.pre && !pr ? FDAAdv.prepaid(q) : q; /* R73: before go-live = RM0 collected now */
 }
 function payAdvHtml(){
   var P = PAY, A = P.adv, B = S.boot || {}, promos = advPromos(), pr = advPromo(), paid = advPaid();
   if (A.promoId && !pr) A.promoId = '';
+  if (A.pre) { A.promoId = ''; pr = null; }
   var q = advQuote(), st = FDAAdv.starts(pr, S.ym), bad = !q || q.error || FDAAdv.clashes(q, paid).length || (pr && pr.limitReached);
-  return '<span class="label" style="display:block;margin-top:12px">Promotion</span>' +
+  /* R73 (partners only): months paid before the system existed; no money now, no receipt */
+  var pre = '<div class="chk"><input id="adv_pre" type="checkbox" data-chg="advPre"' + (A.pre ? ' checked' : '') + '><label for="adv_pre">Already paid before go-live (no money collected now)</label></div>';
+  if (A.pre) return pre +
+    '<span class="label" style="display:block;margin-top:12px">Plan</span><div class="seg" role="group" aria-label="Plan"><button class="chip" type="button" data-act="advPlan" data-v="STD" aria-pressed="' + (A.plan === 'STD') + '">Standard</button><button class="chip" type="button" data-act="advPlan" data-v="UNL" aria-pressed="' + (A.plan === 'UNL') + '">Unlimited</button></div>' +
+    '<div class="f2"><div><label for="adv_months">Months</label><select id="adv_months" data-chg="advMonths">' + opts([1,2,3,4,5,6,7,8,9,10,11,12].map(function(n){ return { v: n, l: n + ' month' + (n === 1 ? '' : 's') }; }), A.months) + '</select></div>' +
+    '<div><label for="adv_start">First month</label><select id="adv_start" data-chg="advStart">' + opts(st.map(function(ym){ return { v: ym, l: monthLabel(ym) + (paid.indexOf(ym) >= 0 ? ' (paid)' : '') }; }), A.start) + '</select></div></div>' +
+    '<div id="adv_sum">' + FDAAdv.breakdown(q, null, paid) + '</div>' +
+    '<p class="sub">No money is collected now and no receipt is made. Method and holder are recorded as "Before go-live".</p>' +
+    '<p><button class="btn good block" type="button" data-act="advSave" id="adv_save"' + (bad ? ' disabled' : '') + '>' + (bad ? 'Save payment' : 'Save · RM0 collected · ' + q.lines.length + ' month' + (q.lines.length === 1 ? '' : 's')) + '</button></p>';
+  return pre + '<span class="label" style="display:block;margin-top:12px">Promotion</span>' +
     '<button class="optcard' + (!pr ? ' on' : '') + '" type="button" data-act="advPromo" data-v=""><span>No promotion · choose plan and months</span><b></b></button>' +
     promos.map(function(x){ return '<button class="optcard' + (pr && pr.promoId === x.promoId ? ' on' : '') + '" type="button" data-act="advPromo" data-v="' + esc(x.promoId) + '"' + (x.limitReached ? ' disabled' : '') + '><span>' + esc(x.name) + '<br><small class="muted">' + (x.plan === 'UNL' ? 'Unlimited' : 'Standard') + ' × ' + x.months + ' month' + (x.months === 1 ? '' : 's') + (x.firstMonthRule !== 'any' ? ' · starts ' + esc(x.firstMonthRule) : '') + (x.limitReached ? ' · already bought (limit ' + x.maxPerMember + ')' : '') + '</small></span><b>' + esc(x.totalLabel || Engine.fmtRM(x.total)) + '</b></button>'; }).join('') +
     (promos.length ? '' : '<p class="sub">No promotions on sale right now.</p>') +
@@ -2358,11 +2393,13 @@ ACT.advPromo = function(b, v){ if (b.disabled) return; PAY.adv.promoId = v || ''
 ACT.advPlan = function(b, v){ PAY.adv.plan = v; drawPay(); };
 CHG.advMonths = function(t){ PAY.adv.months = Number(t.value); drawPay(); };
 CHG.advStart = function(t){ PAY.adv.start = t.value; drawPay(); };
+CHG.advPre = function(t){ PAY.adv.pre = !!t.checked; PAY.adv.start = ''; drawPay(); };
 ACT.advSave = function(b){
   var P = PAY, pr = advPromo(), q = advQuote();
   if (!q || q.error) { toast((q && q.error) || 'Choose a plan and months.', true); return; }
   var clash = FDAAdv.clashes(q, advPaid()); if (clash.length) { toast('Already paid: ' + clash.map(monthLabel).join(', '), true); return; }
   var req = { code: P.code, plan: q.plan, months: q.lines.length, start: q.months[0], promoId: pr ? pr.promoId : '', total: q.total, method: P.method, receivedBy: val('tp_by'), requestId: P.rid };
+  if (q.prepaid) { req.prepaidBeforeGoLive = true; req.promoId = ''; req.method = req.receivedBy = 'Before go-live'; } /* R73: the server sets them; RM0 now */
   b.disabled = true;
   var name = P.ctx.name;
   P.saving = true;
@@ -2840,7 +2877,7 @@ function drawMoney(){
     var it = { kind: 'pay', id: p.pay_id, code: p.code, guest: !p.code, void: !!p.void, name: p.name, row: row, payRow: row };
     var forM = p.month && p.month !== S.moneyYm ? ' · <b>for ' + esc(monthLabel(p.month)) + '</b>' + (p.cash ? '' : ' (paid ' + fmtD(p.date) + ')') : '';
     return '<div class="item' + (p.void ? ' voided' : '') + '"><div class="grow"><b>' + esc(p.name) + '</b> <small>' + esc(p.code) + '</small><br><small class="vx">' + fmtD(p.date) + ' · ' + esc(KIND[p.kind] || p.kind) + forM + (p.bundle_id ? ' · paid ahead' : '') + ' · ' + esc(p.method) + ' · held by ' + esc(p.received_by) +
-      (Number(p.rebate) > 0 ? ' · <span style="color:var(--yellow)">' + (p.promo_id ? 'promo ' : 'rebate ') + rm(p.rebate) + (p.rebate_reason ? ' (' + esc(p.rebate_reason) + ')' : '') + '</span>' : '') + '</small> ' + ptag(p) + '</div><span class="amt">' + rm(p.amount) + '</span>' + pmore(it) +
+      (Number(p.rebate) > 0 ? ' · <span style="color:var(--yellow)">' + (Engine.isPrepaidGoLive(p) ? 'paid before go-live ' : p.promo_id ? 'promo ' : 'rebate ') + rm(p.rebate) + (p.rebate_reason ? ' (' + esc(p.rebate_reason) + ')' : '') + '</span>' : '') + '</small> ' + ptag(p) + '</div><span class="amt">' + rm(p.amount) + '</span>' + pmore(it) +
       '<div class="inline" id="pact_' + esc(p.pay_id) + '">' + rcp + '</div>' + pslot(it) + '</div>';
   }).join('');
   var oi = (m.otherIncome || []).map(function(o){ var rcp = o.void ? '' : o.receipt_no ? (o.receipt_url ? '<a class="btn secondary sm" target="_blank" rel="noopener" href="' + esc(o.receipt_url) + '">Receipt ' + esc(o.receipt_no) + '</a>' : '<span class="pill grey">' + esc(o.receipt_no) + '</span>') : '<button class="btn secondary sm" type="button" data-act="mkReceipt" data-src="OtherIncome" data-id="' + esc(o.inc_id) + '">Make receipt</button>';
@@ -2857,7 +2894,8 @@ function drawMoney(){
   var plans = '<h3 style="margin-top:14px">Plans for this month</h3><table class="hold"><tr><td>Plan value (full price)</td><td><b>' + rm(pl.value) + '</b></td></tr><tr><td>Collected for ' + esc(c.monthLabel || '') + '</td><td>' + rm(pl.collected) + '</td></tr>' +
     '<tr><td>… paid in earlier months (prepaid' + (pl.prepaidMonths ? ', ' + pl.prepaidMonths + ' month' + (pl.prepaidMonths === 1 ? '' : 's') : '') + ')</td><td>' + rm(pl.paidEarlier) + '</td></tr><tr><td>… paid this month</td><td>' + rm(pl.paidThisMonth) + '</td></tr>' +
     (Number(pl.paidLater) ? '<tr><td>… paid later</td><td>' + rm(pl.paidLater) + '</td></tr>' : '') +
-    '<tr><td>Promotion discounts</td><td style="color:var(--yellow)">' + rm(pl.promoDiscount) + '</td></tr><tr><td>Rebates</td><td style="color:var(--yellow)">' + rm(pl.rebates) + '</td></tr></table>' +
+    '<tr><td>Promotion discounts</td><td style="color:var(--yellow)">' + rm(pl.promoDiscount) + '</td></tr><tr><td>Rebates</td><td style="color:var(--yellow)">' + rm(pl.rebates) + '</td></tr>' +
+    (pl.prepaidGoLive && pl.prepaidGoLive.count ? '<tr><td>Prepaid before go-live (' + pl.prepaidGoLive.count + ' member month' + (pl.prepaidGoLive.count === 1 ? '' : 's') + ', no money now)</td><td>' + rm(pl.prepaidGoLive.value) + '</td></tr>' : '') + '</table>' +
     ((c.promoLines || []).length ? c.promoLines.map(function(x){ return '<div class="item"><div class="grow"><b>Promo: ' + esc(x.name) + '</b><br><small>' + x.members + ' member' + (x.members === 1 ? '' : 's') + ' this month · collected ' + rm(x.collected) + '</small></div><span class="amt" style="color:var(--yellow)">−' + rm(x.discount) + '</span></div>'; }).join('') : '');
   var cashCard = '<h3 style="margin-top:14px">Cash received this month</h3><table class="hold"><tr><td>Member payments received</td><td><b>' + rm(cs.total) + '</b></td></tr><tr><td>… for this month</td><td>' + rm(cs.forThisMonth) + '</td></tr>' +
     '<tr><td>… for later months (paid in advance' + (cs.laterMonths ? ', ' + cs.laterMonths + ' month' + (cs.laterMonths === 1 ? '' : 's') : '') + ')</td><td>' + rm(cs.forLaterMonths) + '</td></tr>' + (Number(cs.forEarlierMonths) ? '<tr><td>… for earlier months</td><td>' + rm(cs.forEarlierMonths) + '</td></tr>' : '') + '</table>';

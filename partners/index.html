@@ -13,7 +13,7 @@
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="apple-touch-icon" href="../icons/icon-180.png">
 <link rel="icon" type="image/png" sizes="32x32" href="../icons/icon-32.png">
-<script>window.FDA_API_URL="https://script.google.com/macros/s/AKfycbxDQG-e_sMUr8fYg9NZgUc13STtl1pJ01DpWMI0AWWAHq4i9cCa40Vwm1RhOaPstGzr/exec";</script>
+<script>window.FDA_API_URL="https://script.google.com/macros/s/AKfycbxDQG-e_sMUr8fYg9NZgUc13STtl1pJ01DpWMI0AWWAHq4i9cCa40Vwm1RhOaPstGzr/exec";window.FDA_BUILD="ac0500ea2868";</script>
 <script>
 /* R66 - google.script.run over fetch, for the static pages on fitdancemuar.github.io (inlined into each page by deploy/build-site.js).
    Same chaining API as Apps Script: google.script.run.withSuccessHandler(ok).withFailureHandler(fail).withUserObject(o).fn(...args).
@@ -27,6 +27,8 @@
   if (root.google && root.google.script && root.google.script.run) return;
   var LONG = { partners_runSetup: 1, partners_runImport: 1, partners_monthlyReport: 1, partners_archive: 1, partners_statementPdf: 1, partners_healthCheck: 1, partners_repairData: 1 };
   var NET = 'NetworkError: Connection failure due to HTTP 0';
+  var inflight = 0; // R78: calls not answered yet (the update check never reloads in the middle of one)
+  root.FDA_rpcBusy = function () { return inflight; };
 
   function netErr() { var e = new Error(NET); e.code = 'NETWORK'; return e; }
   function decode(status, okHttp, text) {
@@ -51,6 +53,7 @@
     var init = { method: 'POST', credentials: 'omit', redirect: 'follow', cache: 'no-store', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: body };
     if (ctl) { init.signal = ctl.signal; timer = root.setTimeout(function () { try { ctl.abort(); } catch (e) { /* ignore */ } }, LONG[name] ? 360000 : 90000); }
     var p;
+    inflight++;
     if (body === null || !url || typeof root.fetch !== 'function') p = Promise.resolve({ fail: body === null ? new Error('These details could not be sent.') : netErr() });
     else {
       p = root.fetch(url, init).then(function (res) {
@@ -58,6 +61,7 @@
       }, function () { return { fail: netErr() }; });
     }
     p.then(function (out) {
+      inflight--;
       if (timer) root.clearTimeout(timer);
       try {
         if (out.fail) { if (fail) fail(out.fail, user); else if (root.console) root.console.error('[rpc] ' + name + ': ' + out.fail.message); }
@@ -1071,6 +1075,7 @@ if (typeof module !== 'undefined') module.exports = Engine;
   }
 
   // ---------------------------------------------------------------- the store
+  var openStores = []; // R78: FDAStore.busy() - the update check never reloads while a change is unsent
   function open(o) {
     o = o || {};
     var kind = o.kind || 'staff';
@@ -1309,10 +1314,12 @@ if (typeof module !== 'undefined') module.exports = Engine;
       clear: clearAll,
       setSession: function (s, who) { session = s || ''; if (who) owner = who; emitStatus(); if (session && all().length) flush(); },
       session: function () { return session; },
-      close: function () { closed = true; clrT(retryTimer); clrT(syncTimer); },
+      close: function () { closed = true; clrT(retryTimer); clrT(syncTimer); openStores = openStores.filter(function (x) { return x !== store; }); },
+      _memOnly: function () { return memOnly.length; },
       _merge: merge // tests
     };
 
+    openStores.push(store);
     store.ready = Promise.all([backend.get(KEY), backend.get(OKEY)]).then(function (r) {
       var d = r[0], ob = r[1];
       var same = function (x) { return !owner || !x || !x.owner || x.owner === owner; };
@@ -1332,7 +1339,11 @@ if (typeof module !== 'undefined') module.exports = Engine;
     return store;
   }
 
-  root.FDAStore = { open: open, newRequestId: newRequestId, memoryBackend: memoryBackend, localBackend: localBackend, idbBackend: idbBackend, autoBackend: autoBackend,
+  root.FDAStore = { open: open, newRequestId: newRequestId,
+    /** R78: true while any open store has unsent changes (outbox or in-memory) - no automatic reload then. */
+    busy: function () { return openStores.some(function (s) { return s.status().pending > 0; }); },
+    /** R78 refute: entries kept in memory only (a Join registration) - lost by any reload, so even a tapped update waits. */
+    unsaved: function () { return openStores.some(function (s) { return s._memOnly() > 0; }); }, memoryBackend: memoryBackend, localBackend: localBackend, idbBackend: idbBackend, autoBackend: autoBackend,
     /** Session keys shared with the member page (Peggy / a partner scanning a member QR on their own phone, R51). */
     SESSION_KEYS: { staff: 'fda_staff', partners: 'fda_psession' } };
 })(typeof window !== 'undefined' ? window : globalThis);
@@ -3562,6 +3573,123 @@ ACT.dupOk = function(b, v){
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', mount); else mount();
 })();
 </script>
-<script>if('serviceWorker' in navigator){window.addEventListener('load',function(){navigator.serviceWorker.register('../sw.js').catch(function(){});});}</script>
+<script>window.FDA_SITE_ROOT="../";
+/* R78 - "updates show immediately" (inlined at the end of every page by deploy/build-site.js, after window.FDA_BUILD and
+   window.FDA_SITE_ROOT). Registers the service worker, then checks <site>/version.json (network only: the worker never touches it)
+   on open, when the page comes back to the front, when the phone gets signal again, every few minutes while visible, and when a new
+   worker takes over. A different build id = a newer app is published:
+   - at a safe moment (no unsent outbox items, no server call in flight, no focused or edited field, no open sheet/dialog, the page
+     itself not busy) the page reloads itself once - the worker is network-first for pages, so the reload gets the new app;
+   - otherwise a small "New version — tap to update" bar shows, and the page keeps trying for the safe moment.
+   A reload for a build that still serves the old page (the CDN has not caught up) does not loop: that build only shows the bar. */
+(function (root) {
+  var doc = root.document, nav = root.navigator;
+  var BUILD = String(root.FDA_BUILD || '');
+  var BASE = String(root.FDA_SITE_ROOT || '');
+  var EVERY = 5 * 60000, RETRY = 3000, MARK = 'fda_reloaded_for';
+  var st = { latest: '', bar: null, timer: null, checking: false, hadController: false };
+
+  // the "already reloaded for build X" mark: sessionStorage, else window.name (same tab, survives the reload) - never a loop
+  function wnGet(k) { var m = String(root.name || '').match(new RegExp('(?:^|;)' + k + '=([0-9a-f]+)')); return m ? m[1] : ''; }
+  function wnSet(k, v) { try { root.name = String(root.name || '').replace(new RegExp('(?:^|;)' + k + '=[0-9a-f]*'), '') + ';' + k + '=' + v; } catch (e) { /* ignore */ } }
+  function ssGet(k) { var v = ''; try { v = root.sessionStorage.getItem(k) || ''; } catch (e) { v = ''; } return v || wnGet(k); }
+  function ssSet(k, v) { try { root.sessionStorage.setItem(k, v); } catch (e) { wnSet(k, v); } }
+  function shown(el) {
+    if (!el || (el.classList && el.classList.contains('hidden')) || el.hidden) return false;
+    if (typeof el.getClientRects === 'function') return el.getClientRects().length > 0;
+    return true;
+  }
+  function edited(el) {
+    var t = String(el.type || '').toLowerCase();
+    if (t === 'hidden' || t === 'button' || t === 'submit' || t === 'reset' || t === 'image') return false;
+    if (t === 'checkbox' || t === 'radio') return el.checked !== el.defaultChecked;
+    if (el.options) { // a select with no default option shows its first one: that is not an edit
+      var o = el.options, def = -1, i;
+      for (i = 0; i < o.length; i++) if (o[i].defaultSelected) { def = i; break; }
+      if (!el.multiple) return o.length > 0 && el.selectedIndex !== (def < 0 ? 0 : def);
+      for (i = 0; i < o.length; i++) if (o[i].selected !== o[i].defaultSelected) return true;
+      return false;
+    }
+    return String(el.value == null ? '' : el.value) !== String(el.defaultValue == null ? '' : el.defaultValue);
+  }
+
+  function unsaved() { try { return !!(root.FDAStore && typeof root.FDAStore.unsaved === 'function' && root.FDAStore.unsaved()); } catch (e) { return true; } }
+  /** Why now is not a safe moment to reload ('' = safe). */
+  function blocker() {
+    try { if (typeof root.FDA_rpcBusy === 'function' && root.FDA_rpcBusy() > 0) return 'call'; } catch (e) { return 'call'; }
+    try { if (root.FDAStore && typeof root.FDAStore.busy === 'function' && root.FDAStore.busy()) return 'outbox'; } catch (e) { return 'outbox'; }
+    try { if (typeof root.FDA_busy === 'function' && root.FDA_busy()) return 'page'; } catch (e) { return 'page'; }
+    if (!doc) return '';
+    var a = doc.activeElement;
+    if (a && (/^(INPUT|TEXTAREA|SELECT)$/.test(String(a.tagName || '').toUpperCase()) || a.isContentEditable)) return 'typing';
+    var dl = doc.querySelectorAll ? doc.querySelectorAll('[role="dialog"],[aria-modal="true"],dialog[open]') : [];
+    for (var i = 0; i < dl.length; i++) if (shown(dl[i])) return 'dialog';
+    var f = doc.querySelectorAll ? doc.querySelectorAll('input,textarea,select') : [];
+    for (var j = 0; j < f.length; j++) if (shown(f[j]) && edited(f[j])) return 'form';
+    return '';
+  }
+
+  function reload() {
+    ssSet(MARK, st.latest);
+    try { root.location.reload(); } catch (e) { /* ignore */ }
+  }
+  function hideBar() { if (st.bar && st.bar.parentNode) st.bar.parentNode.removeChild(st.bar); st.bar = null; }
+  function showBar() {
+    if (st.bar || !doc || !doc.body) return;
+    var b = doc.createElement('button');
+    b.type = 'button'; b.id = 'fdaUpdate'; b.setAttribute('role', 'status');
+    b.setAttribute('style', 'position:fixed;left:50%;transform:translateX(-50%);bottom:calc(12px + env(safe-area-inset-bottom));z-index:95;' +
+      'max-width:calc(100% - 32px);min-height:44px;padding:0 18px;border-radius:22px;border:0;background:var(--pink,#f8177f);color:#fff;' +
+      'font:700 14px/1.2 var(--body,system-ui,sans-serif);box-shadow:0 4px 18px rgba(0,0,0,.45);cursor:pointer');
+    b.textContent = 'New version — tap to update · 有新版本';
+    // a tap reloads (the persisted outbox survives it) - but waits for calls in flight and memory-only entries (a Join registration)
+    b.onclick = function () { b.disabled = true; b.textContent = 'Updating…'; (function go() { if (blocker() === 'call' || unsaved()) root.setTimeout(go, 300); else reload(); })(); };
+    doc.body.appendChild(b);
+    st.bar = b;
+  }
+  /** A newer build is out: reload now if safe (once per build), else show the bar and keep trying. */
+  function apply() {
+    if (!st.latest) return;
+    if (st.timer) { root.clearTimeout(st.timer); st.timer = null; }
+    var tried = ssGet(MARK) === st.latest; // already reloaded for this build and still old: no loop, the bar only
+    if (!tried && !blocker()) { reload(); return; }
+    showBar();
+    if (!tried) st.timer = root.setTimeout(apply, RETRY);
+  }
+  function newer(build) { build = String(build || ''); return !!(build && BUILD && build !== BUILD); }
+  /** Fetch <site>/version.json past every cache; resolves true when a newer build was found. */
+  function check() {
+    if (st.checking || typeof root.fetch !== 'function') return Promise.resolve(false);
+    st.checking = true;
+    return root.fetch(BASE + 'version.json?t=' + Date.now(), { cache: 'no-store', credentials: 'omit' })
+      .then(function (r) { return r && r.ok ? r.json() : null; })
+      .then(function (j) {
+        st.checking = false;
+        if (j && newer(j.build)) { st.latest = String(j.build); apply(); return true; }
+        if (j && String(j.build || '') === BUILD) { st.latest = ''; hideBar(); }
+        return false;
+      }, function () { st.checking = false; return false; });
+  }
+
+  function start() {
+    if (nav && nav.serviceWorker && typeof nav.serviceWorker.register === 'function') {
+      st.hadController = !!nav.serviceWorker.controller;
+      nav.serviceWorker.addEventListener('controllerchange', function () {
+        if (st.hadController) check(); // a new worker took over (a new build): confirm with version.json, then reload / bar
+        st.hadController = true;
+      });
+      nav.serviceWorker.register(BASE + 'sw.js').then(function (reg) { if (reg && typeof reg.update === 'function') { try { reg.update(); } catch (e) {} } }, function () {});
+    }
+    check();
+    if (doc && doc.addEventListener) doc.addEventListener('visibilitychange', function () { if (doc.visibilityState === 'visible') check(); });
+    if (root.addEventListener) root.addEventListener('online', function () { check(); });
+    root.setInterval(function () { if (!doc || doc.visibilityState !== 'hidden') check(); }, EVERY);
+  }
+
+  root.FDAUpdate = { check: check, blocker: blocker, safe: function () { return !blocker(); }, newer: newer, build: BUILD, _state: st, _start: start };
+  if (root.FDA_UPDATE_MANUAL) return; // tests drive it by hand
+  if (doc && doc.readyState === 'complete') start(); else if (root.addEventListener) root.addEventListener('load', start);
+})(typeof window !== 'undefined' ? window : this);
+</script>
 </body>
 </html>

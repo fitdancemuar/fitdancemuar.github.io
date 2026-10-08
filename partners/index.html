@@ -686,6 +686,25 @@ var Engine = (function () {
   // ---------- R70 / R71: pay in advance + promotions ----------
   var ADV_MAX_MONTHS = 12;
   /** 'YYYY-MM' plus n months (n may be negative). */
+  /** R75: a real calendar day 'YYYY-MM-DD' (2026-02-31 is not). */
+  function validDay(v) {
+    var s = String(v === undefined || v === null ? '' : v);
+    if (!/^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/.test(s)) return false;
+    return addDays(s, 0) === s;
+  }
+  /** R75: the day the money was received: the row's paid_on (YYYY-MM-DD), else the KL date it was recorded (ts, rows before R75). */
+  function payDate(p) {
+    if (!p) return '';
+    var d = String(p.paid_on === undefined || p.paid_on === null ? '' : p.paid_on).slice(0, 10);
+    if (validDay(d)) return d;
+    var t = parseTs(p.ts);
+    return t ? dateStr(t) : String(p.ts || '').slice(0, 10);
+  }
+  /** R75: the plan month a payment defaults to: the month of paidOn when that is this month (ym) or last month, else this month. */
+  function defaultPlanMonth(paidOn, ym) {
+    var m = String(paidOn || '').slice(0, 7);
+    return m === ym || m === addMonths(ym, -1) ? m : ym;
+  }
   function addMonths(ym, n) {
     var y = +String(ym).slice(0, 4), m = +String(ym).slice(5, 7) - 1 + (Number(n) || 0);
     y += Math.floor(m / 12); m = ((m % 12) + 12) % 12;
@@ -912,7 +931,7 @@ var Engine = (function () {
     classAt: classAt, nextClass: nextClass, classDates: classDates, sessions: sessions, sessionsAround: sessionsAround, staffClass: staffClass,
     planMonth: planMonth, shownResult: shownResult, monthRange: monthRange, sessionStartMs: startMs, sessionEndMs: endMs, weekStart: weekStart, weekIndex: weekIndex, addDays: addDays, classStart: classStart,
     checkIn: checkIn, paymentOptions: paymentOptions, isImported: isImported,
-    ADV_MAX_MONTHS: ADV_MAX_MONTHS, addMonths: addMonths, splitSen: splitSen, monthShort: monthShort, advancePlan: advancePlan,
+    ADV_MAX_MONTHS: ADV_MAX_MONTHS, addMonths: addMonths, validDay: validDay, payDate: payDate, defaultPlanMonth: defaultPlanMonth, splitSen: splitSen, monthShort: monthShort, advancePlan: advancePlan,
     monthClose: monthClose, PREPAID_GOLIVE: PREPAID_GOLIVE, isPrepaidGoLive: isPrepaidGoLive,
     parseFormOption: parseFormOption, birthdayFromIC: birthdayFromIC, parseDob: parseDob,
     normName: normName, healthNote: healthNote, mapRegistrationHeaders: mapRegistrationHeaders,
@@ -1117,7 +1136,7 @@ if (typeof module !== 'undefined') module.exports = Engine;
       if (p.months && p.months.length) { // keep only the months the server still sends (last + this)
         var ok = {}; p.months.forEach(function (m) { ok[m] = true; });
         Object.keys(data.attendance).forEach(function (id) { var r = data.attendance[id]; if (!r._local && r.plan_month && !ok[r.plan_month] && !ok[String(r.class_key).slice(0, 7)]) delete data.attendance[id]; });
-        Object.keys(data.payments).forEach(function (id) { var r = data.payments[id]; if (!r._local && r.month && !ok[r.month] && !ok[String(r.ts).slice(0, 7)]) delete data.payments[id]; });
+        Object.keys(data.payments).forEach(function (id) { var r = data.payments[id]; if (!r._local && r.month && !ok[r.month] && !ok[String(r.ts).slice(0, 7)] && !ok[String(r.paid_on || '').slice(0, 7)]) delete data.payments[id]; }); // R75: the paid_on month keeps a row too
       }
       // optimistic rows whose request was answered before this sync started: the real rows are in by now
       ['attendance', 'payments'].forEach(function (c) {
@@ -1465,7 +1484,7 @@ if (typeof module !== 'undefined') module.exports = Engine;
       var gone = r.void === true;
       if (action === 'delete' && !gone && String(r.month) >= ym) out.push({ coll: 'payments', id: r.pay_id, row: stampFn(r, { void: true, void_reason: 'Bundle deleted: ' + (set && set.why || '') }) });
       if (action === 'restore' && gone && /^Bundle deleted: /.test(String(r.void_reason || ''))) out.push({ coll: 'payments', id: r.pay_id, row: stampFn(r, { void: false, void_reason: '' }) });
-      if (action === 'edit' && !gone) out.push({ coll: 'payments', id: r.pay_id, row: stampFn(r, { method: set.method, received_by: set.received_by }) });
+      if (action === 'edit' && !gone) out.push({ coll: 'payments', id: r.pay_id, row: stampFn(r, set.paid_on ? { method: set.method, received_by: set.received_by, paid_on: set.paid_on } : { method: set.method, received_by: set.received_by }) }); // R75
     });
     return out;
   }
@@ -1634,8 +1653,9 @@ var PL = (function () {
       if (p.method === 'Before go-live' && p.received_by === 'Before go-live') return; // refute R73: RM0, not a collection
       var amt = Number(p.amount) || 0;
       function add(o) { o.total = (sen(o.total) + sen(amt)) / 100; o.byMethod[p.method] = (sen(o.byMethod[p.method]) + sen(amt)) / 100; o.byHolder[p.received_by] = (sen(o.byHolder[p.received_by]) + sen(amt)) / 100; }
-      if (!p.date || p.date === today) add(t.collectedToday);
-      if (!p.date || p.date.slice(0, 7) === ym) add(t.collectedMonth);
+      var d = p.paid_on || p.date; // R75: the day the money was received
+      if (!d || d === today) add(t.collectedToday);
+      if (!d || d.slice(0, 7) === ym) add(t.collectedMonth);
     });
     return t;
   }
@@ -2001,10 +2021,11 @@ function onPayResult(r, entry){
   }
   if (!r.ok) {
     toast((meta.name ? meta.name + ': ' : '') + (r.error || 'Payment not saved'), true);
-    if (P) { P.saving = false; P.rid = ''; if (/refresh/i.test(r.error || '')) openPay(P.code, P.target, P.month); else drawPay(true); }
+    if (P) { P.saving = false; P.rid = ''; if (/refresh/i.test(r.error || '')) openPay(P.code, P.target, P.month, P.paidOn); else drawPay(true); }
   } else {
     r.name = r.name || meta.name;
     if (P) { P.done = r; P.saving = false; drawPay(); } else toast('Payment sent ✓ ' + (r.name || ''));
+    if (r.warning) toast(r.warning, true); /* R75: that month's statement was already made */
     if (S.td.res && S.td.res.code === meta.code && r.newStatus && r.newStatus !== 'NONE' && $('td_status')) { S.td.res = Object.assign({}, S.td.res, { kind: r.newStatus, message: 'Paid ' + r.amountLabel + '. Thank you!', changed: '', provisional: false }); if (!P || P.target !== 'td_pay') $('td_status').innerHTML = statusHtml(); }
   }
   if (S.tab === 'today') refreshToday();
@@ -2300,9 +2321,9 @@ function localPayCtx(code, month){
   return { name: m.name, code: code, month: month, monthLabel: monthLabel(month), paidLabel: Engine.fmtRM(cov.paid), birthday: Engine.isBirthdayMonth(mem, month), local: true,
     options: Engine.paymentOptions(mem, month, pays, es).map(function(o){ return { kind: o.kind, label: o.label, amount: o.amount, amountLabel: Engine.fmtRM(o.amount) }; }) };
 }
-function openPay(code, target, month){
+function openPay(code, target, month, paidOn){
   month = month || S.ym;
-  PAY = { code: code, target: target, month: month, rid: '', sel: -1, method: 'Cash', holder: S.actor, ctx: localPayCtx(code, month), done: null, mode: 'now', adv: { promoId: '', plan: 'STD', months: 3, start: '', pre: false } };
+  PAY = { code: code, target: target, month: month, rid: '', sel: -1, method: 'Cash', holder: S.actor, ctx: localPayCtx(code, month), done: null, mode: 'now', paidOn: paidOn || todayStr(), adv: { promoId: '', plan: 'STD', months: 3, start: '', pre: false } };
   if (target === 'dr_pay') openDrawer(drawerHead('Record payment') + '<div id="dr_pay">' + payHtml() + '</div>');
   else if ($(target)) $(target).innerHTML = payHtml();
   var mine = PAY;
@@ -2336,10 +2357,11 @@ function payHtml(){
   if (!c) return '<div class="card">' + (P.err ? '<div class="error">' + esc(P.err) + '</div>' : spin()) + '</div>';
   var months = [S.ym, addMonth(S.ym, -1)];
   var o = c.options[P.sel];
+  var paidOn = P.mode === 'adv' && P.adv.pre ? '' : payOnHtml(P, c);
   /* R70 / R71: this month (as before) or months ahead / a promotion */
   var modeSeg = '<div class="seg" role="group" aria-label="Payment type"><button class="chip" type="button" data-act="payMode" data-v="now" aria-pressed="' + (P.mode !== 'adv') + '">This month</button><button class="chip" type="button" data-act="payMode" data-v="adv" aria-pressed="' + (P.mode === 'adv') + '">Months ahead · promos</button></div>';
-  if (P.mode === 'adv') return '<div class="card pay"><h3>' + esc(c.name) + ' <small class="muted">' + esc(c.code) + '</small></h3>' + modeSeg + payAdvHtml() + '</div>';
-  return '<div class="card pay"><h3>' + esc(c.name) + ' <small class="muted">' + esc(c.code) + '</small></h3>' + modeSeg +
+  if (P.mode === 'adv') return '<div class="card pay"><h3>' + esc(c.name) + ' <small class="muted">' + esc(c.code) + '</small></h3>' + modeSeg + paidOn + payAdvHtml() + '</div>';
+  return '<div class="card pay"><h3>' + esc(c.name) + ' <small class="muted">' + esc(c.code) + '</small></h3>' + modeSeg + paidOn + '<span class="label" style="display:block;margin-top:12px">For month</span>' +
     '<div class="seg" role="group" aria-label="Month">' + months.map(function(m){ return '<button class="chip" type="button" data-act="payMonth" data-v="' + m + '" aria-pressed="' + (P.month === m) + '">' + esc(monthLabel(m)) + '</button>'; }).join('') + '</div>' +
     '<p class="sub">Paid so far in ' + esc(c.monthLabel) + ': ' + esc(c.paidLabel) + (c.birthday ? ' · <b style="color:var(--yellow)">birthday prices</b>' : '') + (c.local ? ' · checking…' : '') + '</p>' +
     (c.options.length ? c.options.map(function(x, i){ return '<button class="optcard' + (P.sel === i ? ' on' : '') + '" type="button" data-act="payOpt" data-v="' + i + '"><span>' + esc(x.label) + '</span><b>' + esc(x.amountLabel) + '</b></button>'; }).join('') +
@@ -2351,13 +2373,30 @@ function payHtml(){
       '<p><button class="btn good block" type="button" data-act="paySave" id="tp_save"' + (o ? '' : ' disabled') + '>' + (o ? 'Save · collect <span id="tp_collect">' + esc(o.amountLabel) + '</span>' : 'Choose what they pay') + '</button></p>'
       : '<p class="muted">Nothing more to pay for ' + esc(c.monthLabel) + ' (Unlimited).</p>') + '</div>';
 }
+/* ---- R75 "Paid on": default today, any past date (never the future); a month whose statement PDF was made shows a warning */
+function payStatementMonths(c){ var a = (c && c.paidOn && c.paidOn.statementMonths) || (PAY && PAY.stmts) || []; if (PAY && c && c.paidOn) PAY.stmts = a; return a; }
+function stmtWarnText(day, list){ var ym = String(day || '').slice(0, 7); if (!ym || (list || []).indexOf(ym) < 0) return ''; return monthLabel(ym).replace(' ' + todayStr().slice(0, 4), '') + '’s statement was already made — make it again after saving.'; }
+function payOnHtml(P, c){
+  var w = stmtWarnText(P.paidOn, payStatementMonths(c));
+  return '<label for="tp_on">Paid on</label><input type="date" id="tp_on" data-chg="payOn" max="' + todayStr() + '" value="' + esc(P.paidOn || todayStr()) + '">' +
+    '<p class="sub" style="margin:4px 0 0">The day the money was received.' + (P.paidOn && P.paidOn !== todayStr() ? ' Recorded today.' : '') + '</p>' + (w ? '<div class="warn" role="status">' + esc(w) + '</div>' : '');
+}
+CHG.payOn = function(t){
+  var v = t.value || todayStr();
+  if (v > todayStr()) { toast('The "Paid on" date can’t be in the future.', true); t.value = PAY.paidOn; return; }
+  PAY.paidOn = v;
+  if (PAY.mode === 'adv') { PAY.adv.start = ''; drawPay(); return; }
+  var m = Engine.defaultPlanMonth(v, S.ym); /* the plan month follows: its month when this or last month, else this month */
+  if (m !== PAY.month) openPay(PAY.code, PAY.target, m, v); else drawPay(true);
+};
+function advRefYm(){ return Engine.defaultPlanMonth(PAY.adv.pre ? todayStr() : PAY.paidOn, S.ym); }
 /* ---- R70 / R71 months ahead + promotions: breakdown computed on the phone (Engine); the server re-checks everything */
 function advA(){ return PAY.ctx && PAY.ctx.advance ? PAY.ctx.advance : null; }
 function advPromos(){ var a = advA(); return FDAAdv.onSale(a ? a.promos : local('promos')); }
 function advPromo(){ var id = PAY.adv.promoId, o = null; advPromos().forEach(function(x){ if (x.promoId === id) o = x; }); return o; }
-function advPaid(){ var a = advA(); if (a) return a.paidMonths || []; var o = {}; local('payments').forEach(function(x){ if (x.code === PAY.code && !x.void && x.month >= S.ym) o[x.month] = 1; }); return Object.keys(o).sort(); }
+function advPaid(){ var a = advA(); if (a) return a.paidMonths || []; var o = {}, from = addMonth(S.ym, -1); local('payments').forEach(function(x){ if (x.code === PAY.code && !x.void && x.month >= from) o[x.month] = 1; }); return Object.keys(o).sort(); }
 function advQuote(){
-  var A = PAY.adv, pr = advPromo(), st = FDAAdv.starts(pr, S.ym), m = memberLocal(PAY.code) || {}, set = settingsLocal();
+  var A = PAY.adv, pr = advPromo(), st = FDAAdv.starts(pr, advRefYm()), m = memberLocal(PAY.code) || {}, set = settingsLocal();
   if (!A.start || st.indexOf(A.start) < 0) { var paid = advPaid(); A.start = st.filter(function(x){ return paid.indexOf(x) < 0; })[0] || st[0]; }
   var q = FDAAdv.quote({ member: { code: PAY.code, bday_month: m.bday_month }, plan: pr ? pr.plan : A.plan, months: pr ? pr.months : A.months, start: A.start, promo: pr, settings: set ? PL.engineSettings(set) : {} });
   return A.pre && !pr ? FDAAdv.prepaid(q) : q; /* R73: before go-live = RM0 collected now */
@@ -2366,7 +2405,7 @@ function payAdvHtml(){
   var P = PAY, A = P.adv, B = S.boot || {}, promos = advPromos(), pr = advPromo(), paid = advPaid();
   if (A.promoId && !pr) A.promoId = '';
   if (A.pre) { A.promoId = ''; pr = null; }
-  var q = advQuote(), st = FDAAdv.starts(pr, S.ym), bad = !q || q.error || FDAAdv.clashes(q, paid).length || (pr && pr.limitReached);
+  var q = advQuote(), st = FDAAdv.starts(pr, advRefYm()), bad = !q || q.error || FDAAdv.clashes(q, paid).length || (pr && pr.limitReached);
   /* R73 (partners only): months paid before the system existed; no money now, no receipt */
   var pre = '<div class="chk"><input id="adv_pre" type="checkbox" data-chg="advPre"' + (A.pre ? ' checked' : '') + '><label for="adv_pre">Already paid before go-live (no money collected now)</label></div>';
   if (A.pre) return pre +
@@ -2388,7 +2427,8 @@ function payAdvHtml(){
     '<div class="f2"><div><label for="tp_by">Received by</label><select id="tp_by">' + opts(B.holders || [S.actor], P.holder) + '</select></div></div>' +
     '<p><button class="btn good block" type="button" data-act="advSave" id="adv_save"' + (bad ? ' disabled' : '') + '>' + (bad ? 'Save payment' : 'Save · collect ' + esc(Engine.fmtRM(q.total))) + '</button></p>';
 }
-ACT.payMode = function(b, v){ PAY.mode = v; if (v === 'adv' && PAY.month !== S.ym) { openPay(PAY.code, PAY.target, S.ym); PAY.mode = 'adv'; } drawPay(); };
+ACT.payMode = function(b, v){ PAY.mode = v; if (v === 'adv' && PAY.month !== S.ym) { openPay(PAY.code, PAY.target, S.ym, PAY.paidOn); PAY.mode = 'adv'; }
+  else if (v !== 'adv' && Engine.defaultPlanMonth(PAY.paidOn, S.ym) !== PAY.month) { openPay(PAY.code, PAY.target, Engine.defaultPlanMonth(PAY.paidOn, S.ym), PAY.paidOn); } drawPay(); };
 ACT.advPromo = function(b, v){ if (b.disabled) return; PAY.adv.promoId = v || ''; PAY.adv.start = ''; drawPay(); };
 ACT.advPlan = function(b, v){ PAY.adv.plan = v; drawPay(); };
 CHG.advMonths = function(t){ PAY.adv.months = Number(t.value); drawPay(); };
@@ -2398,14 +2438,14 @@ ACT.advSave = function(b){
   var P = PAY, pr = advPromo(), q = advQuote();
   if (!q || q.error) { toast((q && q.error) || 'Choose a plan and months.', true); return; }
   var clash = FDAAdv.clashes(q, advPaid()); if (clash.length) { toast('Already paid: ' + clash.map(monthLabel).join(', '), true); return; }
-  var req = { code: P.code, plan: q.plan, months: q.lines.length, start: q.months[0], promoId: pr ? pr.promoId : '', total: q.total, method: P.method, receivedBy: val('tp_by'), requestId: P.rid };
+  var req = { code: P.code, plan: q.plan, months: q.lines.length, start: q.months[0], promoId: pr ? pr.promoId : '', total: q.total, method: P.method, receivedBy: val('tp_by'), paidOn: P.adv.pre ? '' : P.paidOn, requestId: P.rid };
   if (q.prepaid) { req.prepaidBeforeGoLive = true; req.promoId = ''; req.method = req.receivedBy = 'Before go-live'; } /* R73: the server sets them; RM0 now */
   b.disabled = true;
   var name = P.ctx.name;
   P.saving = true;
   var prid = P.rid = S.store.write('partners_recordPayment', function(r){ req.requestId = r; return [req]; }, {
     label: 'Payment ' + name + ' · ' + FDAAdv.monthsShort(q.months), meta: { code: P.code, name: name, bundle: true, monthsLabel: FDAAdv.monthsShort(q.months), promoName: pr ? pr.name : '' },
-    optimistic: function(st, r){ FDAAdv.localRows(q, P.code, req.method, req.receivedBy, pr, r, new Date().toISOString()).forEach(function(x){ x.date = todayStr(); st.put('payments', x.pay_id, x); }); }
+    optimistic: function(st, r){ FDAAdv.localRows(q, P.code, req.method, req.receivedBy, pr, r, new Date().toISOString()).forEach(function(x){ x.date = x.paid_on = req.paidOn || todayStr(); st.put('payments', x.pay_id, x); }); }
   });
   FDAEdit.undoToast('Payment saved', function(){ pundo(prid, function(res){ return res.payId ? { type: 'payment', action: 'delete', id: res.payId, reason: 'Undo', force: true } : null; }); if (PAY && PAY.rid === prid) PAY = null; });
   drawPay();
@@ -2421,19 +2461,19 @@ function payCollect(){
 INP.tp_rebate = function(){ payCollect(); };
 ACT.payOpt = function(b, v){ PAY.sel = +v; drawPay(true); };
 ACT.payMethod = function(b, v){ PAY.method = v; PAY.holder = PL.defaultHolder(v, S.actor, (S.boot || {}).tngHolder); drawPay(true); if ($('tp_by')) $('tp_by').value = PAY.holder; };
-ACT.payMonth = function(b, v){ openPay(PAY.code, PAY.target, v); };
+ACT.payMonth = function(b, v){ openPay(PAY.code, PAY.target, v, PAY.paidOn); };
 CHG.payBy = function(t){ PAY.holder = t.value; };
 ACT.paySave = function(b){
   var P = PAY, o = P.ctx.options[P.sel]; if (!o) return;
   var chk = PL.rebateCheck(o.amount, val('tp_rebate'), val('tp_reason'));
   if (chk.error) { toast(chk.error, true); return; }
-  var req = { code: P.code, kind: o.kind, amount: o.amount, rebate: chk.rebate || 0, rebateReason: chk.rebate ? val('tp_reason') : '', method: P.method, receivedBy: val('tp_by'), note: val('tp_note'), month: P.month, requestId: P.rid };
+  var req = { code: P.code, kind: o.kind, amount: o.amount, rebate: chk.rebate || 0, rebateReason: chk.rebate ? val('tp_reason') : '', method: P.method, receivedBy: val('tp_by'), note: val('tp_note'), month: P.month, paidOn: P.paidOn, requestId: P.rid };
   b.disabled = true;
   var name = P.ctx.name;
   P.saving = true;
   var prid = P.rid = S.store.write('partners_recordPayment', function(r){ req.requestId = r; return [req]; }, {
     label: 'Payment ' + name, meta: { code: P.code, name: name },
-    optimistic: function(st, r){ st.put('payments', 'local-' + r, { pay_id: 'local-' + r, code: P.code, month: P.month, kind: o.kind, amount: chk.collect, rebate: chk.rebate || 0, method: req.method, received_by: req.receivedBy, void: false, ts: new Date().toISOString(), date: todayStr(), _local: r }); }
+    optimistic: function(st, r){ st.put('payments', 'local-' + r, { pay_id: 'local-' + r, code: P.code, month: P.month, kind: o.kind, amount: chk.collect, rebate: chk.rebate || 0, method: req.method, received_by: req.receivedBy, void: false, ts: new Date().toISOString(), date: P.paidOn, paid_on: P.paidOn, _local: r }); }
   });
   FDAEdit.undoToast('Payment saved', function(){ pundo(prid, function(res){ return res.payId ? { type: 'payment', action: 'delete', id: res.payId, reason: 'Undo' } : null; }); if (PAY && PAY.rid === prid) { PAY = null; if (S.tab === 'today' && $('td_status')) $('td_status').innerHTML = statusHtml(); } });
   drawPay();
@@ -2897,17 +2937,23 @@ function drawMoney(){
     '<tr><td>Promotion discounts</td><td style="color:var(--yellow)">' + rm(pl.promoDiscount) + '</td></tr><tr><td>Rebates</td><td style="color:var(--yellow)">' + rm(pl.rebates) + '</td></tr>' +
     (pl.prepaidGoLive && pl.prepaidGoLive.count ? '<tr><td>Prepaid before go-live (' + pl.prepaidGoLive.count + ' member month' + (pl.prepaidGoLive.count === 1 ? '' : 's') + ', no money now)</td><td>' + rm(pl.prepaidGoLive.value) + '</td></tr>' : '') + '</table>' +
     ((c.promoLines || []).length ? c.promoLines.map(function(x){ return '<div class="item"><div class="grow"><b>Promo: ' + esc(x.name) + '</b><br><small>' + x.members + ' member' + (x.members === 1 ? '' : 's') + ' this month · collected ' + rm(x.collected) + '</small></div><span class="amt" style="color:var(--yellow)">−' + rm(x.discount) + '</span></div>'; }).join('') : '');
-  var cashCard = '<h3 style="margin-top:14px">Cash received this month</h3><table class="hold"><tr><td>Member payments received</td><td><b>' + rm(cs.total) + '</b></td></tr><tr><td>… for this month</td><td>' + rm(cs.forThisMonth) + '</td></tr>' +
-    '<tr><td>… for later months (paid in advance' + (cs.laterMonths ? ', ' + cs.laterMonths + ' month' + (cs.laterMonths === 1 ? '' : 's') : '') + ')</td><td>' + rm(cs.forLaterMonths) + '</td></tr>' + (Number(cs.forEarlierMonths) ? '<tr><td>… for earlier months</td><td>' + rm(cs.forEarlierMonths) + '</td></tr>' : '') + '</table>';
+  /* R76: cash received = member payments + guest drop-ins (by "Paid on") + other income (by its date), each its own line */
+  var csPay = cs.payments !== undefined ? cs.payments : cs.total, oiL = cs.otherIncomeLines || [];
+  var cashCard = '<h3 style="margin-top:14px">Cash received this month · ' + rm(cs.total) + '</h3><table class="hold"><tr><td>Member payments</td><td>' + rm(cs.memberPayments !== undefined ? cs.memberPayments : csPay) + '</td></tr>' +
+    (Number(cs.guestDropIns) ? '<tr><td>Guest drop-ins</td><td>' + rm(cs.guestDropIns) + '</td></tr>' : '') +
+    '<tr><td>… for this month</td><td>' + rm(cs.forThisMonth) + '</td></tr>' +
+    '<tr><td>… for later months (paid in advance' + (cs.laterMonths ? ', ' + cs.laterMonths + ' month' + (cs.laterMonths === 1 ? '' : 's') : '') + ')</td><td>' + rm(cs.forLaterMonths) + '</td></tr>' + (Number(cs.forEarlierMonths) ? '<tr><td>… for earlier months</td><td>' + rm(cs.forEarlierMonths) + '</td></tr>' : '') +
+    '<tr><td>Other income</td><td>' + rm(cs.otherIncome || 0) + '</td></tr>' + oiL.map(function(l){ return '<tr><td>… ' + fmtD(l.date) + ' ' + esc(l.label) + '</td><td>' + rm(l.amount) + '</td></tr>'; }).join('') +
+    '<tr><td><b>Cash received this month</b></td><td><b>' + rm(cs.total) + '</b></td></tr></table>';
   var close = '<div class="card"><h3>Month close · ' + esc(c.monthLabel || monthLabel(S.moneyYm)) + '</h3><p class="sub">Income, net and transfers = cash received this month (payment date).</p><div class="tiles" style="grid-template-columns:1fr 1fr"><div class="tile"><div class="n" style="color:var(--green)">' + rm(c.income) + '</div><div class="label">Income</div></div><div class="tile"><div class="n" style="color:var(--yellow)">' + rm(c.expenses) + '</div><div class="label">Expenses</div></div><div class="tile"><div class="n">' + rm(c.net) + '</div><div class="label">Net</div></div><div class="tile"><div class="n">' + (c.voidedCount || 0) + '</div><div class="label">Voided</div></div></div>' +
     cashCard + plans +
     '<h3 style="margin-top:14px">Transfers to ' + esc(B.studioBank || 'the studio account') + '</h3>' + tr + '<p class="ph-hint">Studio bank and FIT TNG are already in the studio’s own accounts: nothing to transfer.</p><div style="overflow-x:auto">' + hold + '</div>' + reb +
     '<p style="margin-top:12px"><button class="btn" type="button" data-act="stmt">Make statement PDF</button> <span id="stmtOut"></span></p></div>';
   var today = todayStr(), dflt = (today.slice(0, 7) === S.moneyYm ? today : S.moneyYm + '-01');
-  var fIncome = '<div class="card"><h3>Other income</h3><p class="sub">Rental, performances, event tickets.</p><div class="f2"><div><label for="oi_date">Date</label><input type="date" id="oi_date" value="' + dflt + '"></div><div><label for="oi_type">Type</label><select id="oi_type">' + opts(B.incomeTypes || ['Other'], 'Rental') + '</select></div>' +
+  var fIncome = '<div class="card"><h3>Other income</h3><p class="sub">Rental, performances, event tickets.</p><div class="f2"><div><label for="oi_date">Date</label><input type="date" id="oi_date" max="' + today + '" value="' + dflt + '"></div><div><label for="oi_type">Type</label><select id="oi_type">' + opts(B.incomeTypes || ['Other'], 'Rental') + '</select></div>' +
     '<div><label for="oi_from">From (name)</label><input id="oi_from"></div><div><label for="oi_amt">Amount (RM)</label><input id="oi_amt" type="number" step="0.01" min="0" inputmode="decimal"></div></div><label for="oi_desc">Description</label><input id="oi_desc">' +
     '<div class="f2"><div><label for="oi_method">Method</label><select id="oi_method" data-chg="oiMethod">' + opts(B.methods || ['Cash']) + '</select></div><div><label for="oi_by">Received by</label><select id="oi_by">' + holderOpts() + '</select></div></div><p><button class="btn" type="button" data-act="oiAdd">Add income</button></p></div>';
-  var fExp = '<div class="card"><h3>Expense</h3><p class="sub">Add a photo of the bill if you have one.</p><div class="f2"><div><label for="xp_date">Date</label><input type="date" id="xp_date" value="' + dflt + '"></div><div><label for="xp_cat">Category</label><select id="xp_cat">' + opts(B.expenseCategories || ['Other'], 'TNB') + '</select></div>' +
+  var fExp = '<div class="card"><h3>Expense</h3><p class="sub">Add a photo of the bill if you have one.</p><div class="f2"><div><label for="xp_date">Date</label><input type="date" id="xp_date" max="' + today + '" value="' + dflt + '"></div><div><label for="xp_cat">Category</label><select id="xp_cat">' + opts(B.expenseCategories || ['Other'], 'TNB') + '</select></div>' +
     '<div><label for="xp_amt">Amount (RM)</label><input id="xp_amt" type="number" step="0.01" min="0" inputmode="decimal"></div><div><label for="xp_by">Paid by</label><select id="xp_by">' + holderOpts() + '</select></div></div><label for="xp_desc">Description</label><input id="xp_desc">' +
     '<label for="xp_file">Receipt photo</label><input id="xp_file" type="file" accept="image/*,application/pdf"><p><button class="btn" type="button" data-act="exAdd" id="exBtn">Add expense</button></p></div>';
   $('mbody').innerHTML = '<div class="cols two"><div>' + close + '<div class="card"><h3>Payments</h3>' + (pays || '<p class="muted">No payments this month.</p>') + '</div></div>' +
@@ -2935,12 +2981,12 @@ ACT.mnPick = function(b, v){
 ACT.mkReceipt = function(b, v, id){ b.disabled = true; run(W('partners_receipt', b.getAttribute('data-src'), id), 'Receipt made').then(function(r){ if (r) loadMoney(); else b.disabled = false; }); };
 /* R67: Undo of an add = delete it (reason "Undo"); the row stays in the list struck through */
 function undoAdd(type, id, msg){ FDAEdit.undoToast(msg, function(){ run(W('partners_change', { type: type, action: 'delete', id: id, reason: 'Undo', requestId: rid() }), 'Undone ✓').then(function(x){ if (x) loadMoney(); }); }); }
-ACT.oiAdd = function(b){ b.disabled = true; RID.oi = RID.oi || rid(); run(W('partners_addOtherIncome', { date: val('oi_date'), type: val('oi_type'), from: val('oi_from'), description: val('oi_desc'), amount: Number(val('oi_amt')), method: val('oi_method'), received_by: val('oi_by'), requestId: RID.oi })).then(function(r){ if (r) { RID.oi = null; loadMoney(); undoAdd('income', r.row.inc_id, 'Income added'); } else b.disabled = false; }); };
+ACT.oiAdd = function(b){ b.disabled = true; RID.oi = RID.oi || rid(); run(W('partners_addOtherIncome', { date: val('oi_date'), type: val('oi_type'), from: val('oi_from'), description: val('oi_desc'), amount: Number(val('oi_amt')), method: val('oi_method'), received_by: val('oi_by'), requestId: RID.oi })).then(function(r){ if (r) { RID.oi = null; loadMoney(); undoAdd('income', r.row.inc_id, 'Income added'); if (r.warning) toast(r.warning, true); } else b.disabled = false; }); };
 ACT.exAdd = function(b){
   b.disabled = true; RID.ex = RID.ex || rid();
   fileToB64($('xp_file').files[0]).then(function(f){
     return run(W('partners_addExpense', { date: val('xp_date'), category: val('xp_cat'), description: val('xp_desc'), amount: Number(val('xp_amt')), paid_by: val('xp_by'), requestId: RID.ex }, f ? f.b64 : '', f ? f.name : '', f ? f.mime : ''));
-  }, function(){ toast('Could not read that file', true); return null; }).then(function(r){ if (r) { RID.ex = null; loadMoney(); undoAdd('expense', r.row.exp_id, 'Expense added'); } else if ($('exBtn')) $('exBtn').disabled = false; });
+  }, function(){ toast('Could not read that file', true); return null; }).then(function(r){ if (r) { RID.ex = null; loadMoney(); undoAdd('expense', r.row.exp_id, 'Expense added'); if (r.warning) toast(r.warning, true); } else if ($('exBtn')) $('exBtn').disabled = false; });
 };
 ACT.stmt = function(b){ b.disabled = true; run(W('partners_statementPdf', S.moneyYm), 'Statement ready').then(function(r){ b.disabled = false; if (r && r.url) $('stmtOut').innerHTML = '<a class="btn good sm" target="_blank" rel="noopener" href="' + esc(r.url) + '">Open statement PDF</a>'; }); };
 function fileToB64(file){
@@ -3218,7 +3264,7 @@ function pmenuHtml(it){
     var bm = FDAEdit.bundleMonths(local('payments'), bid);
     if (m === 'delete') return h + '<p class="ehint">Deletes every month of this payment from ' + esc(monthLabel(todayStr().slice(0, 7))) + ' on (' + esc(bm) + '). Months already over stay paid.</p>' + FDAEdit.reasonBox('pmWhy') + '<div class="eerr" id="pmErr"></div>' + btns([eb('delGo', 'Delete whole bundle', 'del'), eb('close', 'Keep')]) + '</div>';
     if (m === 'editBundle') { var br = pBundleRow(it);
-      return h + '<p class="ehint">' + esc(bm) + '. The plan, months and price can’t change: delete it and record a new one.</p><div class="erow"><div><label for="pbM">Method</label><select id="pbM">' + opts((S.boot || {}).methods || ['Cash'], br.method) + '</select></div><div><label for="pbB">Received by</label><select id="pbB">' + opts((S.boot || {}).holders || [S.actor], br.received_by || S.actor) + '</select></div></div>' +
+      return h + '<p class="ehint">' + esc(bm) + '. The plan, months and price can’t change: delete it and record a new one.</p><div class="erow"><div><label for="pbM">Method</label><select id="pbM">' + opts((S.boot || {}).methods || ['Cash'], br.method) + '</select></div><div><label for="pbB">Received by</label><select id="pbB">' + opts((S.boot || {}).holders || [S.actor], br.received_by || S.actor) + '</select></div></div>' + pOnField('pbD', Engine.payDate(br)) +
         (br.receipt_no ? '<p class="ehint">Receipt ' + esc(br.receipt_no) + ' will be voided. Make a new one after saving.</p>' : '') + '<div class="eerr" id="pmErr"></div>' + btns([eb('bundleGo', 'Save for every month', ''), eb('close', 'Cancel')]) + '</div>'; }
     return h + '<p class="ehint">Paid ahead together: ' + esc(bm) + '. Change or delete the whole bundle.</p>' + btns([eb('editBundle', 'Edit whole bundle'), eb('delete', 'Delete', 'del'), eb('close', 'Close')]) + '</div>';
   }
@@ -3231,7 +3277,7 @@ function pmenuHtml(it){
   if (m === 'editGuest') {
     var p = it.payRow || {}, B = S.boot || {};
     return h + '<label for="pmGn">Guest name</label><input id="pmGn" maxlength="60" value="' + esc(it.name) + '"><div class="erow"><div><label for="pmGa">Amount RM</label><input id="pmGa" inputmode="decimal" value="' + esc(p.amount !== undefined ? p.amount : ((B.prices || {}).per || 15)) + '"></div><div><label for="pmGm">Method</label><select id="pmGm">' + opts(B.methods || ['Cash'], p.method) + '</select></div></div>' +
-      '<label for="pmGb">Received by</label><select id="pmGb">' + opts(B.holders || [S.actor], p.received_by || S.actor) + '</select><div class="eerr" id="pmErr"></div>' + btns([eb('guestGo', 'Save', ''), eb('close', 'Cancel')]) + '</div>';
+      '<label for="pmGb">Received by</label><select id="pmGb">' + opts(B.holders || [S.actor], p.received_by || S.actor) + '</select>' + (p.pay_id ? pOnField('pmGd', Engine.payDate(p)) : '') + '<div class="eerr" id="pmErr"></div>' + btns([eb('guestGo', 'Save', ''), eb('close', 'Cancel')]) + '</div>';
   }
   if (m === 'editPay') return h + pPayForm(it) + '</div>';
   if (m === 'editInc') return h + pIncForm(it) + '</div>';
@@ -3260,15 +3306,16 @@ ACT.pmDo = function(b, a){
   if (bid && a === 'delGo') { var bw = val('pmWhy').trim(); if (!bw) return err('Please type why.');
     pchange({ type: 'bundle', action: 'delete', id: bid, reason: bw }, { patches: FDAEdit.bundlePatches(local('payments'), bid, 'delete', todayStr().slice(0, 7), { why: bw }, bst) }); return; }
   if (bid && a === 'restore') { pchange({ type: 'bundle', action: 'restore', id: bid }, { patches: FDAEdit.bundlePatches(local('payments'), bid, 'restore', todayStr().slice(0, 7), null, bst) }); return; }
-  if (bid && a === 'bundleGo') { var bmth = val('pbM'), bby = val('pbB');
-    pchange({ type: 'bundle', action: 'edit', id: bid, patch: { method: bmth, receivedBy: bby } }, { patches: FDAEdit.bundlePatches(local('payments'), bid, 'edit', todayStr().slice(0, 7), { method: bmth, received_by: bby }, bst) }); return; }
+  if (bid && a === 'bundleGo') { var bmth = val('pbM'), bby = val('pbB'), bdt = val('pbD'), bde = pOnErr(bdt); if (bde) return err(bde);
+    pchange({ type: 'bundle', action: 'edit', id: bid, patch: { method: bmth, receivedBy: bby, paidOn: bdt } }, { patches: FDAEdit.bundlePatches(local('payments'), bid, 'edit', todayStr().slice(0, 7), { method: bmth, received_by: bby, paid_on: bdt }, bst) }); return; }
   if (a === 'delGo') { var why = val('pmWhy').trim(); if (!why) return err('Please type why.'); pchange({ type: type, action: 'delete', id: it.id, reason: why }, { patches: pDelPatches(it, why) }); return; }
   if (a === 'restore') { pchange({ type: type, action: 'restore', id: it.id }, { patches: pRestorePatches(it) }); return; }
   if (a === 'moveGo') { var to = val('pmTo'); if (!to) return err('Pick a class.'); var lr = (S.store && S.store.get('attendance') || {})[it.id];
     pchange({ type: 'checkin', action: 'edit', id: it.id, patch: { classKey: to } }, { patches: lr ? [{ coll: 'attendance', id: it.id, row: stampRow(lr, { class_key: to }) }] : null }); return; }
   if (a === 'guestGo') { var nm = val('pmGn').trim(), amt = Number(val('pmGa')); if (!nm) return err('Please type the name.'); if (!isFinite(amt) || amt < 0) return err('Check the amount.');
     var patch = { name: nm, amount: Math.round(amt * 100) / 100, method: val('pmGm'), receivedBy: val('pmGb') }, pt = [];
-    if (it.payRow && it.payRow.pay_id) pt.push({ coll: 'payments', id: it.payRow.pay_id, row: stampRow(it.payRow, { amount: patch.amount, method: patch.method, received_by: patch.receivedBy, guest_name: nm }) });
+    if ($('pmGd')) { var gde = pOnErr(val('pmGd')); if (gde) return err(gde); patch.paidOn = val('pmGd'); }
+    if (it.payRow && it.payRow.pay_id) pt.push({ coll: 'payments', id: it.payRow.pay_id, row: stampRow(it.payRow, { amount: patch.amount, method: patch.method, received_by: patch.receivedBy, guest_name: nm, paid_on: patch.paidOn || Engine.payDate(it.payRow) }) });
     pchange({ type: 'guest', action: 'edit', id: it.id, patch: patch }, { patches: pt }); return; }
   if (a === 'payGo') return pPaySave(it, err);
   if (a === 'incGo') return pIncSave(it, err);
@@ -3342,19 +3389,23 @@ function afterChange(){
 /* ---- payment edit (options from the member's earlier payments on this phone; the server re-checks) */
 var PPE = null;
 function pPayBefore(p, month){ return local('payments').filter(function(x){ return x.pay_id !== p.pay_id && x.code === p.code && x.month === month && !x.void && (String(x.ts) + '|' + x.pay_id) < (String(p.ts) + '|' + p.pay_id); }); }
+/* R75: "Paid on" in the edit forms (partners: any past date, never the future) */
+function pOnField(id, v){ return '<label for="' + id + '">Paid on</label><input type="date" id="' + id + '" max="' + todayStr() + '" value="' + esc(v || todayStr()) + '">'; }
+function pOnErr(v){ v = String(v || ''); if (!/^\d{4}-\d{2}-\d{2}$/.test(v)) return 'Choose the "Paid on" date.'; return v > todayStr() ? 'The "Paid on" date can’t be in the future.' : ''; }
 function pPayForm(it){
   var p = it.row, B = S.boot || {}, m = memberLocal(p.code) || {}, set = settingsLocal();
-  if (!PPE || PPE.id !== p.pay_id) PPE = { id: p.pay_id, month: p.month, kind: p.kind, method: p.method, by: p.received_by, rebate: Number(p.rebate) || 0, reason: p.rebate_reason || '' };
+  if (!PPE || PPE.id !== p.pay_id) PPE = { id: p.pay_id, month: p.month, kind: p.kind, method: p.method, by: p.received_by, rebate: Number(p.rebate) || 0, reason: p.rebate_reason || '', paidOn: Engine.payDate(p) };
   var months = [S.ym, addMonth(S.ym, -1)]; if (months.indexOf(PPE.month) < 0) months.unshift(PPE.month);
   var op = set ? Engine.paymentOptions({ code: p.code, bday_month: m.bday_month }, PPE.month, pPayBefore(p, PPE.month), PL.engineSettings(set)) : [];
   return '<label>For month</label><div class="seg">' + months.map(function(x){ return '<button class="chip" type="button" data-act="ppMonth" data-v="' + x + '" aria-pressed="' + (x === PPE.month) + '">' + esc(monthLabel(x)) + '</button>'; }).join('') + '</div>' +
     '<label>What was paid</label>' + (op.length ? op.map(function(o){ return '<button class="optcard' + (o.kind === PPE.kind ? ' on' : '') + '" type="button" data-act="ppKind" data-v="' + esc(o.kind) + '"><span>' + esc(o.label) + '</span><b>' + esc(Engine.fmtRM(o.amount)) + '</b></button>'; }).join('') : '<p class="ehint">Nothing more can be paid for this month.</p>') +
     '<div class="erow"><div><label for="ppM">Method</label><select id="ppM">' + opts(B.methods || ['Cash'], PPE.method) + '</select></div><div><label for="ppB">Received by</label><select id="ppB">' + opts(B.holders || [S.actor], PPE.by) + '</select></div></div>' +
+    pOnField('ppD', PPE.paidOn) +
     '<div class="erow"><div><label for="ppR">Rebate RM</label><input id="ppR" inputmode="decimal" value="' + esc(PPE.rebate || '') + '"></div><div><label for="ppW">Rebate reason</label><input id="ppW" value="' + esc(PPE.reason) + '"></div></div>' +
     (p.receipt_no ? '<p class="ehint">Receipt ' + esc(p.receipt_no) + ' will be voided. Make a new one after saving.</p>' : '') +
     '<div class="eerr" id="pmErr"></div>' + btns([eb('payGo', 'Save changes', ''), eb('close', 'Cancel')]);
 }
-function keepPPE(){ if ($('ppM')) PPE.method = val('ppM'); if ($('ppB')) PPE.by = val('ppB'); if ($('ppR')) PPE.rebate = val('ppR'); if ($('ppW')) PPE.reason = val('ppW'); }
+function keepPPE(){ if ($('ppM')) PPE.method = val('ppM'); if ($('ppB')) PPE.by = val('ppB'); if ($('ppR')) PPE.rebate = val('ppR'); if ($('ppW')) PPE.reason = val('ppW'); if ($('ppD')) PPE.paidOn = val('ppD'); }
 ACT.ppMonth = function(b, v){ keepPPE(); PPE.month = v; PPE.kind = ''; drawPmenu(); };
 ACT.ppKind = function(b, v){ keepPPE(); PPE.kind = v; drawPmenu(); };
 function pPaySave(it, err){
@@ -3362,15 +3413,16 @@ function pPaySave(it, err){
   if (set) Engine.paymentOptions({ code: p.code, bday_month: m.bday_month }, PPE.month, pPayBefore(p, PPE.month), PL.engineSettings(set)).forEach(function(x){ if (x.kind === PPE.kind) o = x; });
   if (!o) return err('Choose what was paid.');
   var chk = PL.rebateCheck(o.amount, String(PPE.rebate || ''), PPE.reason); if (chk.error) return err(chk.error);
-  var patch = { month: PPE.month, kind: o.kind, amount: o.amount, rebate: chk.rebate || 0, rebateReason: chk.rebate ? String(PPE.reason).trim() : '', method: PPE.method, receivedBy: PPE.by };
+  var de = pOnErr(PPE.paidOn); if (de) return err(de);
+  var patch = { month: PPE.month, kind: o.kind, amount: o.amount, rebate: chk.rebate || 0, rebateReason: chk.rebate ? String(PPE.reason).trim() : '', method: PPE.method, receivedBy: PPE.by, paidOn: PPE.paidOn };
   var lr = (S.store.get('payments') || {})[p.pay_id];
-  pchange({ type: 'payment', action: 'edit', id: p.pay_id, patch: patch }, { patches: lr ? [{ coll: 'payments', id: p.pay_id, row: stampRow(lr, { month: PPE.month, kind: o.kind, amount: chk.collect, rebate: chk.rebate || 0, method: PPE.method, received_by: PPE.by }) }] : null });
+  pchange({ type: 'payment', action: 'edit', id: p.pay_id, patch: patch }, { patches: lr ? [{ coll: 'payments', id: p.pay_id, row: stampRow(lr, { month: PPE.month, kind: o.kind, amount: chk.collect, rebate: chk.rebate || 0, method: PPE.method, received_by: PPE.by, paid_on: PPE.paidOn, date: PPE.paidOn }) }] : null });
   PPE = null;
 }
 /* ---- other income / expense edit */
 function pIncForm(it){
   var o = it.row, B = S.boot || {};
-  return '<div class="erow"><div><label for="piD">Date</label><input type="date" id="piD" value="' + esc(String(o.date).slice(0, 10)) + '"></div><div><label for="piT">Type</label><select id="piT">' + opts(B.incomeTypes || ['Other'], o.type) + '</select></div></div>' +
+  return '<div class="erow"><div><label for="piD">Date</label><input type="date" id="piD" max="' + todayStr() + '" value="' + esc(String(o.date).slice(0, 10)) + '"></div><div><label for="piT">Type</label><select id="piT">' + opts(B.incomeTypes || ['Other'], o.type) + '</select></div></div>' +
     '<div class="erow"><div><label for="piF">From (name)</label><input id="piF" value="' + esc(o.from_name || '') + '"></div><div><label for="piA">Amount RM</label><input id="piA" inputmode="decimal" value="' + esc(o.amount) + '"></div></div>' +
     '<label for="piX">Description</label><input id="piX" value="' + esc(o.description || '') + '">' +
     '<div class="erow"><div><label for="piM">Method</label><select id="piM">' + opts(B.methods || ['Cash'], o.method) + '</select></div><div><label for="piB">Received by</label><select id="piB">' + opts(B.holders || [S.actor], o.received_by) + '</select></div></div>' +
@@ -3383,7 +3435,7 @@ function pIncSave(it, err){
 }
 function pExpForm(it){
   var x = it.row, B = S.boot || {};
-  return '<div class="erow"><div><label for="peD">Date</label><input type="date" id="peD" value="' + esc(String(x.date).slice(0, 10)) + '"></div><div><label for="peC">Category</label><select id="peC">' + opts(B.expenseCategories || ['Other'], x.category) + '</select></div></div>' +
+  return '<div class="erow"><div><label for="peD">Date</label><input type="date" id="peD" max="' + todayStr() + '" value="' + esc(String(x.date).slice(0, 10)) + '"></div><div><label for="peC">Category</label><select id="peC">' + opts(B.expenseCategories || ['Other'], x.category) + '</select></div></div>' +
     '<div class="erow"><div><label for="peA">Amount RM</label><input id="peA" inputmode="decimal" value="' + esc(x.amount) + '"></div><div><label for="peB">Paid by</label><select id="peB">' + opts(B.holders || [S.actor], x.paid_by) + '</select></div></div>' +
     '<label for="peX">Description</label><input id="peX" value="' + esc(x.description || '') + '">' +
     '<label for="peF">' + (x.receipt_url ? 'Replace the photo (optional)' : 'Receipt photo (optional)') + '</label><input id="peF" type="file" accept="image/*,application/pdf">' +
@@ -3402,7 +3454,7 @@ function pExpSave(it, err){
 function pGuestPay(attRow, name, day){
   var hit = null, P = local('payments');
   if (attRow && attRow.pay_id) P.forEach(function(p){ if (p.pay_id === attRow.pay_id) hit = p; });
-  if (!hit) P.forEach(function(p){ if (!hit && !p.code && p.kind === 'DROPIN' && String(p.guest_name || '').toLowerCase() === String(name || '').toLowerCase() && Engine.dateStr(Engine.parseTs(p.ts) || new Date(0)) === day) hit = p; });
+  if (!hit) P.forEach(function(p){ if (!hit && !p.code && p.kind === 'DROPIN' && String(p.guest_name || '').toLowerCase() === String(name || '').toLowerCase() && Engine.payDate(p) === day) hit = p; }); // R75
   return hit;
 }
 

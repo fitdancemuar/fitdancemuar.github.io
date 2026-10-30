@@ -1,5 +1,5 @@
 /* R66 / R78 - FIT Dance service worker (deploy/build-site.js fills VERSION = the build id, and SHELL). Caches ONLY the app shell
-   (the three pages, manifests, icons); every other request goes straight to the network untouched. It never sees the API:
+   (the pages - member, staff, partners, R79 join - manifests, icons); every other request goes straight to the network untouched. It never sees the API:
    POSTs and other origins (script.google.com, script.googleusercontent.com, fonts, cdnjs) are not intercepted, and neither is
    version.json (the page's "is there a newer build?" check, R78).
    R78 - updates show at once:
@@ -7,8 +7,8 @@
      used when the network has not answered within NET_WAIT ms - the page then sees the newer build via version.json and reloads);
    - the cache name carries the build id, so a new build installs a new shell (fetched past the HTTP cache) and old caches go;
    - the new worker takes over at once (skipWaiting + clients.claim). */
-var VERSION = "ac0500ea2868";
-var SHELL = ["./","./manifest.webmanifest","./staff/","./staff/manifest.webmanifest","./partners/","./partners/manifest.webmanifest","./icons/icon-32.png","./icons/icon-180.png","./icons/icon-192.png","./icons/icon-512.png","./icons/icon-512-maskable.png"];
+var VERSION = "6a8b52f7b4f8";
+var SHELL = ["./","./manifest.webmanifest","./staff/","./staff/manifest.webmanifest","./partners/","./partners/manifest.webmanifest","./join/","./icons/icon-32.png","./icons/icon-180.png","./icons/icon-192.png","./icons/icon-512.png","./icons/icon-512-maskable.png"];
 var CACHE = 'fda-shell-' + VERSION;
 var NET_WAIT = 4000;
 
@@ -28,7 +28,7 @@ function shellPath(url) {
   var rel = './' + url.pathname.slice(base.length);
   if (url.pathname.indexOf(base) !== 0) return null;
   if (rel === './index.html') rel = './';
-  if (/^\.\/(staff|partners)\/index\.html$/.test(rel)) rel = rel.replace(/index\.html$/, '');
+  if (/^\.\/(staff|partners|join)\/index\.html$/.test(rel)) rel = rel.replace(/index\.html$/, '');
   return SHELL.indexOf(rel) >= 0 ? rel : null;
 }
 function isPage(rel) { return rel === './' || /\/$/.test(rel); }

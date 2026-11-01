@@ -13,7 +13,7 @@
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="apple-touch-icon" href="../icons/icon-180.png">
 <link rel="icon" type="image/png" sizes="32x32" href="../icons/icon-32.png">
-<script>window.FDA_API_URL="https://script.google.com/macros/s/AKfycbxDQG-e_sMUr8fYg9NZgUc13STtl1pJ01DpWMI0AWWAHq4i9cCa40Vwm1RhOaPstGzr/exec";window.FDA_BUILD="6a8b52f7b4f8";</script>
+<script>window.FDA_API_URL="https://script.google.com/macros/s/AKfycbxDQG-e_sMUr8fYg9NZgUc13STtl1pJ01DpWMI0AWWAHq4i9cCa40Vwm1RhOaPstGzr/exec";window.FDA_BUILD="ce4f68abd152";</script>
 <script>
 /* R66 - google.script.run over fetch, for the static pages on fitdancemuar.github.io (inlined into each page by deploy/build-site.js).
    Same chaining API as Apps Script: google.script.run.withSuccessHandler(ok).withFailureHandler(fail).withUserObject(o).fn(...args).
@@ -162,6 +162,7 @@ th,td{padding:10px 8px;border-bottom:1px solid var(--line)}
 .qr{background:#fff;border-radius:14px;padding:12px;display:inline-block}
 </style>
 
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcode-generator/1.4.4/qrcode.min.js" async onload="window.FDA_qrReady&&FDA_qrReady()"></script>
 <style>
 html,body{overflow-x:hidden}
 .keypad{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin:16px 0}
@@ -235,6 +236,15 @@ textarea{width:100%;min-height:72px;box-sizing:border-box}
 @media (prefers-reduced-motion:reduce){.skel{animation:none}}
 .tabs{display:flex;flex-wrap:nowrap;gap:8px;padding:4px 0 12px;margin:0 -16px;padding-left:16px;padding-right:16px;overflow-x:auto;overflow-y:hidden;-webkit-overflow-scrolling:touch;scroll-snap-type:x proximity;scrollbar-width:none;overscroll-behavior-x:contain}
 .tabs .chip{flex:0 0 auto;justify-content:center;min-height:48px;padding:0 16px;font-size:15px;white-space:nowrap;scroll-snap-align:start}
+/* R81 Members tab */
+.mrow{display:flex;align-items:center;gap:10px;width:100%;text-align:left;background:var(--surface-2);border:1px solid transparent;border-radius:12px;padding:10px 12px;margin:6px 0;color:var(--ink);font:inherit;cursor:pointer;min-height:56px}
+.mrow .who{flex:1;min-width:0}.mrow .who b{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.mrow .who small{color:var(--muted);display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.mfil{display:flex;gap:6px;overflow-x:auto;margin:8px -16px 4px;padding:0 16px 4px;scrollbar-width:none}.mfil .chip{flex:0 0 auto;min-height:44px;padding:0 14px;font-size:14px}
+.mback{background:none;border:0;color:var(--cyan);font:600 15px var(--body);padding:8px 0;min-height:44px;cursor:pointer}
+.mdl{display:grid;grid-template-columns:minmax(0,38%) minmax(0,1fr);gap:6px 10px;font-size:15px;margin:6px 0}.mdl dt{color:var(--muted)}.mdl dd{margin:0;overflow-wrap:anywhere;white-space:pre-wrap}
+.mic{display:flex;gap:8px;align-items:center}.mic input{flex:1;min-width:0}
+.mcard{display:flex;justify-content:center}.mcard canvas{width:100%;max-width:300px;height:auto;border-radius:16px;background:#fff}
+textarea{width:100%;min-height:64px;box-sizing:border-box}
 </style>
 </head>
 <body>
@@ -1554,6 +1564,61 @@ if (typeof module !== 'undefined') module.exports = Engine;
 })(typeof window !== 'undefined' ? window : globalThis);
 </script>
 
+<!-- R81: the member QR card (white card, stripe, QR error level H with the logo, code + name, FIT DANCE ACADEMY), shared by the
+     partners' member drawer and Peggy's Members tab. Needs qrcode-generator (cdnjs) on the page; the logo is the header image. -->
+<script>
+window.FDACard = (function(){
+function spaced(g, text, cx, y, gap){
+  var w = 0, i, ws = [];
+  for (i = 0; i < text.length; i++) { ws[i] = g.measureText(text[i]).width; w += ws[i] + (i < text.length - 1 ? gap : 0); }
+  var x = cx - w / 2; g.textAlign = 'left';
+  for (i = 0; i < text.length; i++) { g.fillText(text[i], x, y); x += ws[i] + gap; }
+}
+function rrect(g, x, y, w, h, r){ g.beginPath(); g.moveTo(x + r, y); g.arcTo(x + w, y, x + w, y + h, r); g.arcTo(x + w, y + h, x, y + h, r); g.arcTo(x, y + h, x, y, r); g.arcTo(x, y, x + w, y, r); g.closePath(); }
+function logoImg(){ return document.querySelector('.hdr img') || document.querySelector('img.logo'); }
+/* White card: stripe, QR (error level H) with the logo in the centre, code + name, FIT DANCE ACADEMY. */
+function draw(cv, link, code, name){
+  var g = cv.getContext('2d'), W_ = cv.width, H_ = cv.height;
+  function paint(){
+    g.clearRect(0, 0, W_, H_);
+    g.fillStyle = '#fff'; rrect(g, 0, 0, W_, H_, 56); g.fill();
+    g.save(); rrect(g, 0, 0, W_, H_, 56); g.clip();
+    ['#f8177f','#895cff','#39cbf0','#ffe047'].forEach(function(c, i){ g.fillStyle = c; g.beginPath(); var x0 = i * W_ / 4; g.moveTo(x0 + 20, 0); g.lineTo((i + 1) * W_ / 4 + 20, 0); g.lineTo((i + 1) * W_ / 4, 18); g.lineTo(x0, 18); g.closePath(); g.fill(); });
+    g.restore();
+    var size = 700, ox = (W_ - size) / 2, oy = 90;
+    if (typeof qrcode === 'function') {
+      var q = qrcode(0, 'H'); q.addData(link); q.make();
+      var n = q.getModuleCount(), quiet = 2, cell = Math.floor(size / (n + quiet * 2)), off = Math.floor((size - cell * n) / 2);
+      g.fillStyle = '#000';
+      for (var r = 0; r < n; r++) for (var c = 0; c < n; c++) if (q.isDark(r, c)) g.fillRect(ox + off + c * cell, oy + off + r * cell, cell, cell);
+      var img = logoImg(), ls = Math.round(size * 0.24), lx = ox + (size - ls) / 2, ly = oy + (size - ls) / 2;
+      g.fillStyle = '#fff'; rrect(g, lx - 10, ly - 10, ls + 20, ls + 20, 22); g.fill();
+      try { g.save(); rrect(g, lx, ly, ls, ls, 16); g.clip(); g.drawImage(img, lx, ly, ls, ls); g.restore(); } catch (e) { g.restore(); }
+    } else {
+      g.fillStyle = '#000'; g.font = '28px sans-serif'; g.textAlign = 'center'; g.fillText('QR library unavailable', W_ / 2, oy + 200);
+    }
+    g.fillStyle = '#0b0a0f'; g.textAlign = 'center';
+    g.font = '130px "Bebas Neue","Oswald",Impact,sans-serif'; g.fillText(code, W_ / 2, 930);
+    var nm = name, fs = 54; g.font = '700 ' + fs + 'px Figtree,system-ui,sans-serif';
+    while (g.measureText(nm).width > W_ - 120 && fs > 28) { fs -= 2; g.font = '700 ' + fs + 'px Figtree,system-ui,sans-serif'; }
+    g.fillText(nm, W_ / 2, 1010);
+    g.fillStyle = '#6e6880'; g.font = '600 28px Figtree,system-ui,sans-serif'; spaced(g, 'FIT DANCE ACADEMY', W_ / 2, 1082, 9);
+  }
+  paint();
+  try { if (document.fonts && document.fonts.load) Promise.all([document.fonts.load('130px "Bebas Neue"'), document.fonts.load('700 54px Figtree')]).then(paint); } catch (e) {}
+  var img0 = logoImg(); if (img0 && !img0.complete) img0.onload = paint;
+}
+/* Download the card as <code>.png */
+function download(cv, code){
+  cv.toBlob(function(b){
+    var a = document.createElement('a'); a.href = URL.createObjectURL(b); a.download = code + '.png';
+    document.body.appendChild(a); a.click(); setTimeout(function(){ URL.revokeObjectURL(a.href); a.remove(); }, 500);
+  }, 'image/png');
+}
+return { draw: draw, download: download };
+})();
+</script>
+
 <script>
 /* Peggy's console (R52, R55-R59, R61). Local-first: every screen paints from the copy on this phone (FDAStore, _store.html),
    one door_sync on open / every 60 s / after writes; every write goes through the outbox with a requestId. */
@@ -1561,15 +1626,19 @@ var KEY='fda_staff', NAME_KEY='fda_staff_name';
 var T0=(window.performance&&performance.now)?performance.now():0;
 window.FDA_PERF={};
 var session='', me='Peggy', st=null, tab='today', pin='', busy=false, selClass='';
-var TABS=[['today','Today'],['checkin','Check in'],['pay','Pay'],['unpaid','Unpaid'],['guest','Guest'],['new','Join'],['edit','Edit'],['history','History']];
+var TABS=[['today','Today'],['checkin','Check in'],['pay','Pay'],['unpaid','Unpaid'],['guest','Guest'],['new','Join'],['members','Members'],['edit','Edit'],['history','History']];
 var S={ q:'', ci:null, recent:[], pay:null, payQ:'', saved:null, receipt:null, guest:{name:'',method:'Cash',by:'',cls:''},
         ed:{list:null,cls:null,confirm:'',moving:'',q:'',busy:false}, hist:{open:''} };
 var NM=null;
+/* R81: Members tab. MB.open = ONE member's details from door_member, held in memory only (never in the phone's store / outbox);
+   dropped on Back, on leaving the tab and on logout. */
+var MB={q:'',mode:'all',more:false,open:null};
 /* R78-busy */ /* R78 refute: forms kept in memory (re-rendered inputs look unedited) -> no automatic reload; the update bar instead */
 window.FDA_busy=function(){
   if(NM&&!NM.result){var b=blankNM();for(var k in b)if(String(NM[k]==null?'':NM[k])!==String(b[k]))return true;}
   if(S.guest&&String(S.guest.name||'').trim())return true;
   if(S.pay&&!S.saved)return true;
+  if(MB.open&&MB.open.edit)return true;
   return !!(EM&&EM.mode);
 };
 /* /R78-busy */
@@ -1681,11 +1750,11 @@ function submitPin(){
     else{pin='';drawDots();$('pinMsg').textContent=(r&&r.error)||'Wrong PIN';}
   }).withFailureHandler(function(){busy=false;pin='';drawDots();$('pinMsg').textContent='No signal. Check the internet and try again.';}).door_login(pin);
 }
-function authLost(){ session=''; lsSet(KEY,null); showPin('Please enter the PIN again.'); }
+function authLost(){ session=''; lsSet(KEY,null); MB.open=null; showPin('Please enter the PIN again.'); }
 function logout(){
   var s=session; session=''; lsSet(KEY,null); lsSet(NAME_KEY,null);
   if(s){try{google.script.run.withFailureHandler(function(){}).door_logout(s);}catch(e){}}
-  var done=function(){ st=null; S.recent=[]; S.ci=null; S.pay=null; S.saved=null; NM=null; showPin(); };
+  var done=function(){ st=null; S.recent=[]; S.ci=null; S.pay=null; S.saved=null; NM=null; MB.open=null; MB.q=''; showPin(); };
   if(st){ st.close(); st.clear().then(done,done); } else done();
 }
 
@@ -1747,8 +1816,8 @@ function drawTabs(){
   if(on){var l=on.offsetLeft-16,r=on.offsetLeft+on.offsetWidth+16-el.clientWidth;if(el.scrollLeft>l)el.scrollLeft=l;else if(el.scrollLeft<r)el.scrollLeft=r;}
 }
 function go(t){ tab=t; drawTabs(); window.scrollTo(0,0); paint(); }
-function paint(){ if(!st)return; var v=$('view'); v.onclick=null;
-  ({today:viewToday,checkin:viewCheckin,pay:viewPay,unpaid:viewUnpaid,guest:viewGuest,'new':viewNew,edit:loadEdit,history:viewHistory}[tab]||viewToday)(); }
+function paint(){ if(!st)return; var v=$('view'); v.onclick=null; if(tab!=='members')MB.open=null; /* R81: details never outlive the Members tab */
+  ({today:viewToday,checkin:viewCheckin,pay:viewPay,unpaid:viewUnpaid,guest:viewGuest,'new':viewNew,members:viewMembers,edit:loadEdit,history:viewHistory}[tab]||viewToday)(); }
 /* data changed (sync / write): repaint what shows local data without wiping what Peggy is typing */
 function refresh(x){
   if(!st||$('console').classList.contains('hidden'))return;
@@ -1756,6 +1825,7 @@ function refresh(x){
   if(tab==='today'&&!typing)viewToday();
   else if(tab==='checkin')paintCheckin();
   else if(tab==='pay'&&S.saved)viewPay();
+  else if(tab==='members'&&!MB.open&&!typing)paintMembers();
 }
 var PILL={PAID:['paid','Paid'],TRIAL:['trial','Trial'],UNPAID:['unpaid','Unpaid'],GUEST:['guest','Guest'],IMPORTED:['imported','Before go-live'],ALREADY:['already','Already'],VOID:['void','Removed']};
 function pill(r,pending){var p=PILL[r]||['',r];return '<span class="pill '+p[0]+'">'+esc(p[1])+'</span>'+(pending?' <span class="pill wait" title="Saving">…</span>':'');}
@@ -1885,7 +1955,7 @@ function doCheckin(code){
 function todayStr(){return Engine.dateStr(now());}
 function paidOnField(id,v){ return '<label for="'+id+'" class="label">Paid on</label><input type="date" id="'+id+'" min="'+peggyFrom()+'" max="'+todayStr()+'" value="'+esc(v||todayStr())+'"><p class="muted" style="margin:4px 0 0;font-size:13px">The day the money was received · this week or last week.</p>'; }
 function paidOnErr(v){ v=String(v||''); if(!/^\d{4}-\d{2}-\d{2}$/.test(v))return 'Choose the "Paid on" date.'; if(v>todayStr())return 'The "Paid on" date can’t be in the future.'; if(v<peggyFrom())return '"Paid on" can be from '+Engine.fmtDate(peggyFrom())+' (Monday last week) to today. For an older date please ask a partner.'; return ''; }
-function startPay(code){ S.pay=null;S.saved=null;S.receipt=null; tab='pay'; drawTabs(); window.scrollTo(0,0); pickPay(code); }
+function startPay(code){ MB.open=null; S.pay=null;S.saved=null;S.receipt=null; tab='pay'; drawTabs(); window.scrollTo(0,0); pickPay(code); }
 function pickPay(code){
   var m=member(code); if(!m){toast('Member not found on this phone yet',true);return;}
   var meth=methods()[0]||'Cash';
@@ -2145,6 +2215,144 @@ function viewNew(){
   };
 }
 
+/* ================================================================ Members (R81): local index list, one member's page on demand */
+var MB_MODES=[['all','All'],['active','Active this month'],['unpaid','Unpaid'],['inactive','Inactive']];
+var MB_FIELDS=[['name','Full name'],['sex','Sex'],['id_type','ID type'],['id_no','IC / passport'],['bday_day','Birthday day'],['bday_month','Birthday month'],['bday_year','Birth year'],['phone','Mobile'],['email','Email'],
+  ['address','Address'],['referral','How they heard about us'],['emergency_name','Emergency contact'],['emergency_phone','Emergency number'],['physical_limits','Physical limitations'],['allergies','Allergies'],['other_illness','Other illness / injuries / surgery'],['notes','Notes'],['status','Status']];
+/* Refute R81: "Unpaid" = the server's own Unpaid list (door_unpaid: owing + not paid yet, saved by the Unpaid tab); the local
+   estimate below is used only until that list has been fetched once this month. */
+function mbUnpaidSet(ym){ var u=st.meta('unpaid'); if(!u||u.month!==ym)return null; var s={}; (u.owing||[]).concat(u.notPaidYet||[]).forEach(function(m){if(m&&m.code)s[m.code]=1;}); return s; }
+function mbUnpaidFetch(){ call('door_unpaid',[],function(r){ if(r&&!r.error&&r.month){st.meta('unpaid',r);st.meta('unpaidAt',Date.now());} if(tab==='members'&&!MB.open&&MB.mode==='unpaid')paintMembers(); },function(){}); }
+function mbOwing(code){ var ym=ymNow(),v=visits(code,ym),c=st.get('coverage')[code+'|'+ym];
+  if(v>0){ if(c&&c.covered===null)return false; var cov=c?Number(c.covered)||0:0; if(v>cov)return true; }
+  return !memberPays(code,ym).length&&memberPays(code,prevYm(ym)).length>0; }
+function mbList(){
+  var ym=ymNow(), q=MB.q.trim(), l;
+  if(q) l=search(q); else { var ms=members(); l=Object.keys(ms).map(function(k){return ms[k];}).sort(function(a,b){return String(a.name).localeCompare(String(b.name));}); }
+  var us=MB.mode==='unpaid'?mbUnpaidSet(ym):null;
+  return l.filter(function(m){ if(!m||m.status==='Deleted')return false;
+    if(MB.mode==='active')return memberPays(m.code,ym).length>0||visits(m.code,ym)>0;
+    if(MB.mode==='unpaid')return us?!!us[m.code]:m.status!=='Inactive'&&mbOwing(m.code);
+    if(MB.mode==='inactive')return m.status==='Inactive';
+    return true; });
+}
+function viewMembers(){
+  if(MB.open)return paintMember();
+  var h='<h3 class="sec-title">Members</h3><label for="mbq" class="label">Search</label><input id="mbq" type="search" inputmode="search" autocomplete="off" placeholder="Name or code (e.g. A1)" value="'+esc(MB.q)+'">'+
+    '<div class="mfil" role="group" aria-label="Filter">'+MB_MODES.map(function(c){return '<button type="button" class="chip" data-mbmode="'+c[0]+'" aria-pressed="'+(MB.mode===c[0])+'">'+c[1]+'</button>';}).join('')+'</div><div id="mbOut"></div>';
+  $('view').innerHTML=h;
+  $('mbq').oninput=function(){MB.q=this.value;MB.more=false;paintMembers();};
+  $('view').onclick=function(e){ var b=e.target.closest('[data-mbmode]'); if(b){MB.mode=b.getAttribute('data-mbmode');MB.more=false;viewMembers();if(MB.mode==='unpaid')mbUnpaidFetch();return;}
+    var o=e.target.closest('[data-mbopen]'); if(o){openMemberPage(o.getAttribute('data-mbopen'));return;}
+    if(e.target.closest('[data-mbmore]')){MB.more=true;paintMembers();} };
+  paintMembers();
+}
+function paintMembers(){
+  var o=$('mbOut'); if(!o)return;
+  var l=mbList(), shown=l.slice(0,MB.more?5000:60), h='';
+  if(!l.length){ o.innerHTML='<p class="empty">No members match'+(st.hasData()?'':' (still loading the member list)')+'.</p>'; return; }
+  h+='<p class="muted" style="margin:6px 0">'+l.length+(l.length===1?' member':' members')+'</p>';
+  shown.forEach(function(m){ h+='<button type="button" class="mrow" data-mbopen="'+esc(m.code)+'"><span class="who"><b>'+esc(m.name)+(m.healthNote?'<span class="hn">Health note</span>':'')+'</b><small>'+esc(m.code)+' · '+esc(m.phoneMasked||'')+(m.status==='Inactive'?' · Inactive':'')+'</small><small>'+esc(statusLine(m.code))+'</small></span><span class="go" aria-hidden="true">›</span></button>'; });
+  if(l.length>shown.length)h+='<button type="button" class="btn secondary block" data-mbmore="1">Show all '+l.length+'</button>';
+  o.innerHTML=h;
+}
+/* one member's details from the server (needs signal; never saved on this phone) */
+function openMemberPage(code){
+  MB.open={code:code,data:null,ic:'',edit:false,err:'',loading:true};
+  paintMember(); window.scrollTo(0,0);
+  call('door_member',[code],function(r){
+    if(!MB.open||MB.open.code!==code)return;
+    MB.open.loading=false;
+    if(!r||!r.ok){MB.open.err=(r&&r.error)||'Member not found.';}
+    else{ MB.open.data=r; MB.open.err=''; if(MB.open.ic&&r.member)r.member.id_no=MB.open.ic; }
+    if(tab==='members')paintMember();
+  },function(){ if(!MB.open||MB.open.code!==code)return; MB.open.loading=false; MB.open.err='No signal. A member’s details need the internet.'; if(tab==='members')paintMember(); });
+}
+function closeMemberPage(){ MB.open=null; viewMembers(); }
+function mbVal(v){ v=String(v==null?'':v).trim(); return v?esc(v):'<span class="muted">—</span>'; }
+function mbDob(m){ var d=m.bday_day,mo=+m.bday_month,y=m.bday_year; if(!mo)return ''; return (d?d+' ':'')+MONTHS[mo-1]+(y?' '+y:''); }
+function paintMember(){
+  var o=MB.open; if(!o||tab!=='members')return;
+  var lm=member(o.code)||{code:o.code,name:o.code};
+  var h='<button type="button" class="mback" id="mbBack">‹ Members</button>';
+  if(!o.data){ h+='<h3 class="sec-title">'+esc(lm.name)+'</h3><p class="muted">'+esc(o.code)+'</p>'+(o.loading?'<div class="skel"></div><div class="skel"></div><div class="skel"></div>':'<div class="error">'+esc(o.err)+'</div><button type="button" class="btn block" id="mbRetry">Try again</button>');
+    $('view').innerHTML=h; $('mbBack').onclick=closeMemberPage; var rt=$('mbRetry'); if(rt)rt.onclick=function(){openMemberPage(o.code);}; return; }
+  var m=o.data.member, mo=o.data.month, card=o.data.card||{};
+  h+='<h3 class="sec-title" style="margin-bottom:0">'+esc(m.name)+(m.health_note?'<span class="hn">Health note</span>':'')+'</h3><p class="muted" style="margin:2px 0 8px">'+esc(m.code)+' · '+esc(m.status)+(m.joined_at?' · joined '+esc(Engine.fmtDate(String(m.joined_at).slice(0,10))):'')+(m.edited_by?' · edited by '+esc(m.edited_by):'')+'</p>';
+  if(o.edit) h+=mbForm(m,o);
+  else{
+    h+='<div class="actions"><button type="button" class="btn good" id="mbPay">Record payment</button><button type="button" class="btn secondary" id="mbEdit">Edit details</button></div>';
+    h+='<div class="card"><span class="label">'+esc(mo.label)+'</span><h2 style="margin:4px 0">'+esc(mo.planLabel)+(mo.paid?' · '+rm(mo.paid)+' paid':'')+'</h2><p class="muted" style="margin:0 0 6px">'+mo.classes.length+(mo.classes.length===1?' class':' classes')+' this month</p>';
+    mo.classes.forEach(function(c){h+='<div class="person"><div class="who"><b>'+esc(c.label)+'</b><small>'+esc(c.via)+'</small></div>'+pill(c.result)+'</div>';});
+    if(mo.payments.length){h+='<span class="label" style="display:block;margin-top:10px">Payments</span>'; mo.payments.forEach(function(p){h+='<div class="person"><div class="who"><b>'+esc(KINDL[p.kind]||p.kind)+' · '+rm(p.amount)+'</b><small>'+esc(p.method)+' · '+esc(p.received_by)+' · '+esc(Engine.fmtDate(p.paid_on))+(p.bundle_id?' · paid ahead':'')+'</small></div></div>';});}
+    h+='</div>';
+    h+='<div class="card"><span class="label">Details</span><dl class="mdl">'+
+      '<dt>Sex</dt><dd>'+mbVal(m.sex)+'</dd><dt>'+esc(m.id_type||'IC / passport')+'</dt><dd><span class="mic"><span id="mbIc">'+mbVal(o.ic||m.id_no)+'</span>'+(m.id_masked&&!o.ic?'<button type="button" class="btn secondary sm" id="mbShowIc">Show IC</button>':'')+'</span></dd>'+
+      '<dt>Birthday</dt><dd>'+mbVal(mbDob(m))+'</dd><dt>Mobile</dt><dd>'+mbVal(m.phone)+'</dd><dt>Email</dt><dd>'+mbVal(m.email)+'</dd><dt>Address</dt><dd>'+mbVal(m.address)+'</dd>'+
+      '<dt>Heard from</dt><dd>'+mbVal(m.referral)+'</dd><dt>Emergency</dt><dd>'+mbVal([m.emergency_name,m.emergency_phone].filter(function(x){return String(x||'').trim();}).join(' · '))+'</dd>'+
+      '<dt>Physical limits</dt><dd>'+mbVal(m.physical_limits)+'</dd><dt>Allergies</dt><dd>'+mbVal(m.allergies)+'</dd><dt>Other illness</dt><dd>'+mbVal(m.other_illness)+'</dd><dt>Notes</dt><dd>'+mbVal(m.notes)+'</dd></dl></div>';
+    h+='<div class="card"><span class="label">QR card</span>'+(card.link?'<div class="mcard" style="margin-top:8px"><canvas id="mbCv" width="900" height="1140" aria-label="Member QR card"></canvas></div><div class="actions" style="margin-top:10px"><button type="button" class="btn secondary" id="mbDl">Download PNG</button>'+(card.waUrl?'<a class="btn good" href="'+esc(card.waUrl)+'" target="_blank" rel="noopener">WhatsApp</a>':'')+'</div>'+(card.waError?'<p class="muted" style="font-size:13px">'+esc(card.waError)+'</p>':'<p class="muted" style="font-size:13px;margin:0">WhatsApp opens with the welcome text and the member link. Attach the downloaded PNG yourself.</p>'):'<div class="notice">'+esc(card.waError||'No member link yet.')+'</div>')+'</div>';
+  }
+  $('view').innerHTML=h;
+  $('mbBack').onclick=closeMemberPage;
+  if(o.edit){ mbFormWire(m,o); return; }
+  $('mbPay').onclick=function(){ startPay(o.code); };
+  $('mbEdit').onclick=function(){ o.edit=true; o.err=''; paintMember(); };
+  var si=$('mbShowIc'); if(si)si.onclick=function(){ mbShowIc(si); };
+  if(card.link&&$('mbCv')){ mbDrawCard(); window.FDA_qrReady=mbDrawCard; $('mbDl').onclick=function(){ FDACard.download($('mbCv'),m.code); }; }
+}
+function mbDrawCard(){ var o=MB.open,cv=$('mbCv'); if(!o||!o.data||!cv)return; FDACard.draw(cv,o.data.card.link,o.data.member.code,o.data.member.name); }
+function mbShowIc(b){ var o=MB.open, code=o.code; if(b)b.disabled=true;
+  call('door_revealIc',[code],function(r){ if(!MB.open||MB.open.code!==code)return;
+    if(!r||!r.ok){ if(b)b.disabled=false; toast((r&&r.error)||'Could not show the IC',true); return; }
+    MB.open.ic=r.id_no; if(MB.open.data)MB.open.data.member.id_no=r.id_no; paintMember(); },
+    function(){ if(b)b.disabled=false; toast('No signal. Try again in a moment.',true); }); }
+function mbSel(id,list,v){ var l=list.slice(); if(v&&l.indexOf(v)<0)l.unshift(v); return '<select id="'+id+'">'+(v?'':'<option value="">—</option>')+l.map(function(x){return '<option'+(x===v?' selected':'')+'>'+esc(x)+'</option>';}).join('')+'</select>'; }
+function mbForm(m,o){
+  var f=o.form||m;
+  function inp(k,label,type,extra){return '<label for="mb_'+k+'" class="label">'+label+'</label><input id="mb_'+k+'" type="'+(type||'text')+'" value="'+esc(f[k])+'" '+(extra||'')+'>';}
+  function ta(k,label){return '<label for="mb_'+k+'" class="label">'+label+'</label><textarea id="mb_'+k+'">'+esc(f[k])+'</textarea>';}
+  return '<div class="card">'+inp('name','Full name *','text','autocomplete="off"')+
+    '<div class="field-row"><div><label for="mb_sex" class="label">Sex</label>'+mbSel('mb_sex',['Female','Male'],String(f.sex||''))+'</div><div><label for="mb_status" class="label">Status</label>'+mbSel('mb_status',['Active','Inactive'],String(f.status||'Active'))+'</div></div>'+
+    '<div class="field-row"><div><label for="mb_id_type" class="label">ID type</label>'+mbSel('mb_id_type',['MyKad','Passport'],String(f.id_type||''))+'</div><div><label for="mb_id_no" class="label">IC / passport</label><input id="mb_id_no" value="'+esc(o.ic?f.id_no:m.id_no)+'" autocomplete="off"'+(m.id_masked&&!o.ic?' readonly aria-describedby="mbIcHint"':'')+'></div></div>'+
+    (m.id_masked&&!o.ic?'<p class="muted" id="mbIcHint" style="font-size:13px;margin:4px 0 0">Hidden. Tap <b>Show IC</b> on the member page to change it (it is logged).</p>':'')+
+    '<div class="field-row"><div>'+inp('bday_day','Birthday day','number','inputmode="numeric" min="1" max="31"')+'</div><div>'+inp('bday_month','Month (1-12)','number','inputmode="numeric" min="1" max="12"')+'</div></div>'+
+    inp('bday_year','Birth year','number','inputmode="numeric"')+inp('phone','Mobile','tel','inputmode="tel"')+inp('email','Email','email')+ta('address','Address')+inp('referral','How they heard about us')+
+    '<div class="field-row"><div>'+inp('emergency_name','Emergency contact')+'</div><div>'+inp('emergency_phone','Emergency number','tel','inputmode="tel"')+'</div></div>'+
+    ta('physical_limits','Physical limitations')+ta('allergies','Allergies')+ta('other_illness','Other illness / injuries / surgery')+ta('notes','Notes')+
+    '<div id="mbErr">'+(o.err?'<div class="error">'+esc(o.err)+'</div>':'')+'</div>'+
+    '<div class="actions" style="margin-top:12px"><button type="button" class="btn good" id="mbSave"'+(o.saving?' disabled':'')+'>'+(o.saving?'Saving…':'Save')+'</button><button type="button" class="btn secondary" id="mbCancel">Cancel</button></div>'+
+    '<p class="muted" style="font-size:13px;margin:0">Member code, QR code, free trial and carry-over: please ask a partner.</p></div>';
+}
+function mbFormRead(){ var o=MB.open, f={}; MB_FIELDS.forEach(function(x){ var el=$('mb_'+x[0]); if(el)f[x[0]]=el.value; }); o.form=Object.assign({},o.data.member,f); return f; }
+function mbFormWire(m,o){
+  var keep=function(){ mbFormRead(); };
+  MB_FIELDS.forEach(function(x){ var el=$('mb_'+x[0]); if(el)el.oninput=el.onchange=keep; });
+  $('mbCancel').onclick=function(){ o.edit=false; o.form=null; o.err=''; paintMember(); };
+  $('mbSave').onclick=function(){
+    var f=mbFormRead(), patch={};
+    MB_FIELDS.forEach(function(x){ var k=x[0]; if(f[k]===undefined)return; if(k==='id_no'&&!o.ic)return; /* a masked IC is never sent */
+      if(String(f[k]).trim()!==String(m[k]==null?'':m[k]).trim())patch[k]=String(f[k]).trim(); });
+    if(patch.name!==undefined&&!patch.name){ o.err='The name cannot be empty.'; paintMember(); return; }
+    if(!Object.keys(patch).length){ o.edit=false; o.form=null; toast('No changes'); paintMember(); return; }
+    if(joinOffline()){ o.err='No signal. Saving a member’s details needs the internet (they are not kept on this phone).'; paintMember(); return; }
+    o.saving=true; o.err='';
+    var lm=member(o.code), row=lm?Object.assign({},lm,patch.name?{name:patch.name}:{},patch.status?{status:patch.status}:{}):null;
+    change({type:'member',action:'edit',id:o.code,patch:patch},{what:'member',patches:row?[{coll:'members',id:o.code,row:{code:row.code,name:row.name,phoneMasked:row.phoneMasked,status:row.status,bday_month:patch.bday_month!==undefined?patch.bday_month:row.bday_month,trial_used:row.trial_used,healthNote:row.healthNote,updated_at:row.updated_at}}]:null});
+    paintMember();
+  };
+}
+/* the door_change answer for a member edit (or its Undo): refresh the open page from the server */
+function memberAnswer(res,e){
+  var o=MB.open, code=e.meta&&e.meta.id;
+  if(!o||o.code!==code){ if(tab==='members'&&!MB.open)paintMembers(); return; }
+  o.saving=false;
+  if(FDAEdit.failed(res)){ if(o.edit){ o.err=(res&&res.error)||'Not saved.'; } if(tab==='members')paintMember(); return; }
+  o.edit=false; o.form=null; o.err='';
+  if(res.before&&res.before.id_no!==undefined)o.ic=''; /* the IC changed: show it masked again until Show IC */
+  openMemberPage(code);
+}
+
 /* ================================================================ Edit (R25): this week + last week, server-checked */
 function loadEdit(){
   S.ed.cls=null;S.ed.confirm='';S.ed.moving='';
@@ -2254,7 +2462,8 @@ function inverse(req,res){
 function change(req,o){
   o=o||{};
   var label=(req.action==='delete'?'Delete ':req.action==='restore'?'Restore ':'Edit ')+(o.what||req.type);
-  var rid=st.write('door_change',function(id){req.requestId=id;return [req];},{label:label,patches:o.patches||null,meta:{type:req.type,action:req.action,id:req.id,undo:!!o.undo,req:Object.assign({},req)}});
+  var mem=req.type==='member'&&req.action==='edit'; /* R81: personal details never go into the saved outbox (memory only, like Join) */
+  var rid=st.write('door_change',function(id){req.requestId=id;return [req];},{label:label,persist:!mem,patches:o.patches||null,meta:{type:req.type,action:req.action,id:req.id,undo:!!o.undo,req:mem?null:Object.assign({},req)}});
   EM={key:'',mode:''};
   if(o.undo) toast('Undone ✓');
   else saved(rid,req.action==='delete'?'Deleted':req.action==='restore'?'Restored':'Saved',function(res){ return inverse(req,res); });
@@ -2415,6 +2624,7 @@ function registerHandlers(){
     }
     else if(FDAEdit.failed(res)){ FDAEdit.hideToast(); toast((undo?'Undo not done: ':'Not saved: ')+((res&&res.error)||''),true); }
     else if(res.receiptVoided||res.warning) toast([res.receiptVoided?'Receipt '+res.receiptVoided+' voided. Make a new one if needed.':'',res.warning||''].join(' ').trim(),!!res.warning);
+    if(e.meta&&e.meta.type==='member'&&e.meta.action==='edit'){ memberAnswer(res,e); return; } /* R81 */
     if(tab==='edit'&&S.ed.cls&&!S.ed.busy)openEditClass(S.ed.cls.classKey,true);
     else if(tab==='history')viewHistory();
     else repaint();

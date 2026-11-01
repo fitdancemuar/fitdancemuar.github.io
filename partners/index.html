@@ -13,7 +13,7 @@
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="apple-touch-icon" href="../icons/icon-180.png">
 <link rel="icon" type="image/png" sizes="32x32" href="../icons/icon-32.png">
-<script>window.FDA_API_URL="https://script.google.com/macros/s/AKfycbxDQG-e_sMUr8fYg9NZgUc13STtl1pJ01DpWMI0AWWAHq4i9cCa40Vwm1RhOaPstGzr/exec";window.FDA_BUILD="6a8b52f7b4f8";</script>
+<script>window.FDA_API_URL="https://script.google.com/macros/s/AKfycbxDQG-e_sMUr8fYg9NZgUc13STtl1pJ01DpWMI0AWWAHq4i9cCa40Vwm1RhOaPstGzr/exec";window.FDA_BUILD="ce4f68abd152";</script>
 <script>
 /* R66 - google.script.run over fetch, for the static pages on fitdancemuar.github.io (inlined into each page by deploy/build-site.js).
    Same chaining API as Apps Script: google.script.run.withSuccessHandler(ok).withFailureHandler(fail).withUserObject(o).fn(...args).
@@ -1511,6 +1511,61 @@ if (typeof module !== 'undefined') module.exports = Engine;
 })(typeof window !== 'undefined' ? window : globalThis);
 </script>
 
+<!-- R81: the member QR card (white card, stripe, QR error level H with the logo, code + name, FIT DANCE ACADEMY), shared by the
+     partners' member drawer and Peggy's Members tab. Needs qrcode-generator (cdnjs) on the page; the logo is the header image. -->
+<script>
+window.FDACard = (function(){
+function spaced(g, text, cx, y, gap){
+  var w = 0, i, ws = [];
+  for (i = 0; i < text.length; i++) { ws[i] = g.measureText(text[i]).width; w += ws[i] + (i < text.length - 1 ? gap : 0); }
+  var x = cx - w / 2; g.textAlign = 'left';
+  for (i = 0; i < text.length; i++) { g.fillText(text[i], x, y); x += ws[i] + gap; }
+}
+function rrect(g, x, y, w, h, r){ g.beginPath(); g.moveTo(x + r, y); g.arcTo(x + w, y, x + w, y + h, r); g.arcTo(x + w, y + h, x, y + h, r); g.arcTo(x, y + h, x, y, r); g.arcTo(x, y, x + w, y, r); g.closePath(); }
+function logoImg(){ return document.querySelector('.hdr img') || document.querySelector('img.logo'); }
+/* White card: stripe, QR (error level H) with the logo in the centre, code + name, FIT DANCE ACADEMY. */
+function draw(cv, link, code, name){
+  var g = cv.getContext('2d'), W_ = cv.width, H_ = cv.height;
+  function paint(){
+    g.clearRect(0, 0, W_, H_);
+    g.fillStyle = '#fff'; rrect(g, 0, 0, W_, H_, 56); g.fill();
+    g.save(); rrect(g, 0, 0, W_, H_, 56); g.clip();
+    ['#f8177f','#895cff','#39cbf0','#ffe047'].forEach(function(c, i){ g.fillStyle = c; g.beginPath(); var x0 = i * W_ / 4; g.moveTo(x0 + 20, 0); g.lineTo((i + 1) * W_ / 4 + 20, 0); g.lineTo((i + 1) * W_ / 4, 18); g.lineTo(x0, 18); g.closePath(); g.fill(); });
+    g.restore();
+    var size = 700, ox = (W_ - size) / 2, oy = 90;
+    if (typeof qrcode === 'function') {
+      var q = qrcode(0, 'H'); q.addData(link); q.make();
+      var n = q.getModuleCount(), quiet = 2, cell = Math.floor(size / (n + quiet * 2)), off = Math.floor((size - cell * n) / 2);
+      g.fillStyle = '#000';
+      for (var r = 0; r < n; r++) for (var c = 0; c < n; c++) if (q.isDark(r, c)) g.fillRect(ox + off + c * cell, oy + off + r * cell, cell, cell);
+      var img = logoImg(), ls = Math.round(size * 0.24), lx = ox + (size - ls) / 2, ly = oy + (size - ls) / 2;
+      g.fillStyle = '#fff'; rrect(g, lx - 10, ly - 10, ls + 20, ls + 20, 22); g.fill();
+      try { g.save(); rrect(g, lx, ly, ls, ls, 16); g.clip(); g.drawImage(img, lx, ly, ls, ls); g.restore(); } catch (e) { g.restore(); }
+    } else {
+      g.fillStyle = '#000'; g.font = '28px sans-serif'; g.textAlign = 'center'; g.fillText('QR library unavailable', W_ / 2, oy + 200);
+    }
+    g.fillStyle = '#0b0a0f'; g.textAlign = 'center';
+    g.font = '130px "Bebas Neue","Oswald",Impact,sans-serif'; g.fillText(code, W_ / 2, 930);
+    var nm = name, fs = 54; g.font = '700 ' + fs + 'px Figtree,system-ui,sans-serif';
+    while (g.measureText(nm).width > W_ - 120 && fs > 28) { fs -= 2; g.font = '700 ' + fs + 'px Figtree,system-ui,sans-serif'; }
+    g.fillText(nm, W_ / 2, 1010);
+    g.fillStyle = '#6e6880'; g.font = '600 28px Figtree,system-ui,sans-serif'; spaced(g, 'FIT DANCE ACADEMY', W_ / 2, 1082, 9);
+  }
+  paint();
+  try { if (document.fonts && document.fonts.load) Promise.all([document.fonts.load('130px "Bebas Neue"'), document.fonts.load('700 54px Figtree')]).then(paint); } catch (e) {}
+  var img0 = logoImg(); if (img0 && !img0.complete) img0.onload = paint;
+}
+/* Download the card as <code>.png */
+function download(cv, code){
+  cv.toBlob(function(b){
+    var a = document.createElement('a'); a.href = URL.createObjectURL(b); a.download = code + '.png';
+    document.body.appendChild(a); a.click(); setTimeout(function(){ URL.revokeObjectURL(a.href); a.remove(); }, 500);
+  }, 'image/png');
+}
+return { draw: draw, download: download };
+})();
+</script>
+
 <style>
 /* R70 / R71: pay in advance + promotions (shared by Peggy's Pay and the partners' Record payment) */
 .adv-bd{width:100%;border-collapse:collapse;margin:8px 0 4px;font-size:15px}
@@ -2654,52 +2709,9 @@ function showCard(){
     if ($('waSlot')) $('waSlot').innerHTML = w.error ? '<span class="sub">' + esc(w.error) + '</span>' : waBtn(w.url, 'WhatsApp welcome');
   }, handleErr);
 }
-function spaced(g, text, cx, y, gap){
-  var w = 0, i, ws = [];
-  for (i = 0; i < text.length; i++) { ws[i] = g.measureText(text[i]).width; w += ws[i] + (i < text.length - 1 ? gap : 0); }
-  var x = cx - w / 2; g.textAlign = 'left';
-  for (i = 0; i < text.length; i++) { g.fillText(text[i], x, y); x += ws[i] + gap; }
-}
-function rrect(g, x, y, w, h, r){ g.beginPath(); g.moveTo(x + r, y); g.arcTo(x + w, y, x + w, y + h, r); g.arcTo(x + w, y + h, x, y + h, r); g.arcTo(x, y + h, x, y, r); g.arcTo(x, y, x + w, y, r); g.closePath(); }
-function logoImg(){ return document.querySelector('.hdr img') || document.querySelector('img.logo'); }
-/* White card: stripe, QR (error level H) with the logo in the centre, code + name, FIT DANCE ACADEMY. */
-function drawCard(cv, link, code, name){
-  var g = cv.getContext('2d'), W_ = cv.width, H_ = cv.height;
-  function paint(){
-    g.clearRect(0, 0, W_, H_);
-    g.fillStyle = '#fff'; rrect(g, 0, 0, W_, H_, 56); g.fill();
-    g.save(); rrect(g, 0, 0, W_, H_, 56); g.clip();
-    ['#f8177f','#895cff','#39cbf0','#ffe047'].forEach(function(c, i){ g.fillStyle = c; g.beginPath(); var x0 = i * W_ / 4; g.moveTo(x0 + 20, 0); g.lineTo((i + 1) * W_ / 4 + 20, 0); g.lineTo((i + 1) * W_ / 4, 18); g.lineTo(x0, 18); g.closePath(); g.fill(); });
-    g.restore();
-    var size = 700, ox = (W_ - size) / 2, oy = 90;
-    if (typeof qrcode === 'function') {
-      var q = qrcode(0, 'H'); q.addData(link); q.make();
-      var n = q.getModuleCount(), quiet = 2, cell = Math.floor(size / (n + quiet * 2)), off = Math.floor((size - cell * n) / 2);
-      g.fillStyle = '#000';
-      for (var r = 0; r < n; r++) for (var c = 0; c < n; c++) if (q.isDark(r, c)) g.fillRect(ox + off + c * cell, oy + off + r * cell, cell, cell);
-      var img = logoImg(), ls = Math.round(size * 0.24), lx = ox + (size - ls) / 2, ly = oy + (size - ls) / 2;
-      g.fillStyle = '#fff'; rrect(g, lx - 10, ly - 10, ls + 20, ls + 20, 22); g.fill();
-      try { g.save(); rrect(g, lx, ly, ls, ls, 16); g.clip(); g.drawImage(img, lx, ly, ls, ls); g.restore(); } catch (e) { g.restore(); }
-    } else {
-      g.fillStyle = '#000'; g.font = '28px sans-serif'; g.textAlign = 'center'; g.fillText('QR library unavailable', W_ / 2, oy + 200);
-    }
-    g.fillStyle = '#0b0a0f'; g.textAlign = 'center';
-    g.font = '130px "Bebas Neue","Oswald",Impact,sans-serif'; g.fillText(code, W_ / 2, 930);
-    var nm = name, fs = 54; g.font = '700 ' + fs + 'px Figtree,system-ui,sans-serif';
-    while (g.measureText(nm).width > W_ - 120 && fs > 28) { fs -= 2; g.font = '700 ' + fs + 'px Figtree,system-ui,sans-serif'; }
-    g.fillText(nm, W_ / 2, 1010);
-    g.fillStyle = '#6e6880'; g.font = '600 28px Figtree,system-ui,sans-serif'; spaced(g, 'FIT DANCE ACADEMY', W_ / 2, 1082, 9);
-  }
-  paint();
-  try { if (document.fonts && document.fonts.load) Promise.all([document.fonts.load('130px "Bebas Neue"'), document.fonts.load('700 54px Figtree')]).then(paint); } catch (e) {}
-  var img0 = logoImg(); if (img0 && !img0.complete) img0.onload = paint;
-}
-ACT.cardDl = function(){
-  $('cardCv').toBlob(function(b){
-    var a = document.createElement('a'); a.href = URL.createObjectURL(b); a.download = S.open.code + '.png';
-    document.body.appendChild(a); a.click(); setTimeout(function(){ URL.revokeObjectURL(a.href); a.remove(); }, 500);
-  }, 'image/png');
-};
+/* R81: the QR card is drawn by the shared FDACard (_card.html), the same card Peggy's console shows. */
+function drawCard(cv, link, code, name){ FDACard.draw(cv, link, code, name); }
+ACT.cardDl = function(){ FDACard.download($('cardCv'), S.open.code); };
 ACT.cardSave = function(){
   run(W('partners_saveCard', S.open.code, $('cardCv').toDataURL('image/png')), 'Saved to Drive').then(function(r){
     if (r && r.url && $('rotArea')) $('rotArea').insertAdjacentHTML('afterbegin', '<p class="sub">Saved: <a target="_blank" rel="noopener" href="' + esc(r.url) + '">' + esc(r.name) + '</a></p>');

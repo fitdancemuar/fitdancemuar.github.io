@@ -8,7 +8,7 @@
 <meta name="referrer" content="no-referrer">
 <link rel="apple-touch-icon" href="../icons/icon-180.png">
 <link rel="icon" type="image/png" sizes="32x32" href="../icons/icon-32.png">
-<script>window.FDA_API_URL="https://script.google.com/macros/s/AKfycbxDQG-e_sMUr8fYg9NZgUc13STtl1pJ01DpWMI0AWWAHq4i9cCa40Vwm1RhOaPstGzr/exec";window.FDA_BUILD="ce4f68abd152";</script>
+<script>window.FDA_API_URL="https://script.google.com/macros/s/AKfycbxDQG-e_sMUr8fYg9NZgUc13STtl1pJ01DpWMI0AWWAHq4i9cCa40Vwm1RhOaPstGzr/exec";window.FDA_BUILD="858abc478014";</script>
 <script>
 /* R66 - google.script.run over fetch, for the static pages on fitdancemuar.github.io (inlined into each page by deploy/build-site.js).
    Same chaining API as Apps Script: google.script.run.withSuccessHandler(ok).withFailureHandler(fail).withUserObject(o).fn(...args).
@@ -352,6 +352,12 @@ function collect(){
     agreed: !!($('fAgree') && $('fAgree').checked), hp_note: String(($('hpNote')||{}).value||'')
   };
 }
+/** R82(d): a real calendar day 'YYYY-MM-DD' (2026-02-31 is not). */
+function realDay(s){
+  var m=/^(\d{4})-(\d{2})-(\d{2})$/.exec(String(s||'')); if(!m) return false;
+  var d=new Date(Date.UTC(+m[1], +m[2]-1, +m[3]));
+  return d.getUTCFullYear()===+m[1] && d.getUTCMonth()===+m[2]-1 && d.getUTCDate()===+m[3];
+}
 /** The first missing answer: [message, field id] or null. The server checks everything again. */
 function missing(f){
   if(f.name.length<2) return ['Please type your full name. 请填写姓名。','fName'];
@@ -359,7 +365,7 @@ function missing(f){
   if(!f.id_type) return ['Please choose MyKad or Passport. 请选择证件类型。','idTypea'];
   if(!f.id_no) return ['Please type your '+(f.id_type==='MyKad'?'MyKad':'passport')+' number. 请填写证件号码。','fIdNo'];
   if(f.id_type==='MyKad' && !/^\d{12}$/.test(f.id_no.replace(/[\s-]/g,''))) return ['Please type your 12-digit MyKad number. 请填写12位身份证号码。','fIdNo'];
-  if(!/^\d{4}-\d{2}-\d{2}$/.test(f.dob)) return ['Please choose your date of birth. 请选择出生日期。','fDob'];
+  if(!realDay(f.dob) || f.dob>todayIso() || f.dob<'1900-01-01') return ['Please choose your date of birth. 请选择出生日期。','fDob']; /* R82(d): 30/02 is refused */
   if(f.phone.replace(/\D/g,'').length<9) return ['Please type your mobile number. 请填写联络电话。','fPhone'];
   if(!f.emergency_name) return ['Please type an emergency contact name. 请填写紧急联络人。','fEcName'];
   if(f.emergency_phone.replace(/\D/g,'').length<9) return ['Please type the emergency contact number. 请填写紧急联络人的电话。','fEcPhone'];

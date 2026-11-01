@@ -13,7 +13,7 @@
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="apple-touch-icon" href="../icons/icon-180.png">
 <link rel="icon" type="image/png" sizes="32x32" href="../icons/icon-32.png">
-<script>window.FDA_API_URL="https://script.google.com/macros/s/AKfycbxDQG-e_sMUr8fYg9NZgUc13STtl1pJ01DpWMI0AWWAHq4i9cCa40Vwm1RhOaPstGzr/exec";window.FDA_BUILD="ce4f68abd152";</script>
+<script>window.FDA_API_URL="https://script.google.com/macros/s/AKfycbxDQG-e_sMUr8fYg9NZgUc13STtl1pJ01DpWMI0AWWAHq4i9cCa40Vwm1RhOaPstGzr/exec";window.FDA_BUILD="858abc478014";</script>
 <script>
 /* R66 - google.script.run over fetch, for the static pages on fitdancemuar.github.io (inlined into each page by deploy/build-site.js).
    Same chaining API as Apps Script: google.script.run.withSuccessHandler(ok).withFailureHandler(fail).withUserObject(o).fn(...args).
@@ -210,7 +210,7 @@ body{overflow-x:clip}
 .bars .b i{display:block;height:22px;border-radius:6px;background:var(--cyan);min-width:3px}
 .bars .b em{font-style:normal;color:var(--muted);font-size:13px}
 .drawer{position:fixed;inset:0;z-index:40;background:rgba(0,0,0,.6);display:flex;justify-content:flex-end}
-.drawer .panel{background:var(--bg);width:100%;max-width:640px;height:100%;overflow-y:auto;overflow-x:hidden;padding:0 16px 40px;border-left:1px solid var(--line)}
+.drawer .panel{background:var(--bg);width:100%;max-width:640px;height:100%;overflow-y:auto;overflow-x:hidden;padding:0 16px calc(40px + var(--toast-h, 0px));border-left:1px solid var(--line)}
 .drawer .ph{display:flex;align-items:flex-start;gap:10px;position:sticky;top:0;background:var(--bg);padding:14px 0 10px;z-index:2;border-bottom:1px solid var(--line);margin-bottom:6px}
 .drawer .ph h2{font-size:28px;overflow-wrap:anywhere}
 .f2{display:grid;grid-template-columns:1fr;gap:0 12px}
@@ -223,7 +223,7 @@ body{overflow-x:clip}
 .cardwrap canvas{width:100%;max-width:320px;height:auto;border-radius:14px;background:#fff}
 .warn{background:rgba(255,224,71,.12);border:1px solid var(--yellow);border-radius:12px;padding:10px 12px;margin:10px 0;font-size:14px}
 .okline{background:rgba(46,229,157,.1);border:1px solid var(--green);border-radius:12px;padding:10px 12px;margin:8px 0;font-size:14px}
-.full{position:fixed;inset:0;z-index:60;background:var(--bg);display:flex;align-items:flex-start;justify-content:center;padding:0 16px 24px;overflow-y:auto}
+.full{position:fixed;inset:0;z-index:60;background:var(--bg);display:flex;align-items:flex-start;justify-content:center;padding:0 16px calc(24px + var(--toast-h, 0px));overflow-y:auto}
 .toast{position:fixed;left:12px;right:12px;bottom:16px;max-width:520px;margin:0 auto;background:var(--green);color:var(--dark);font-weight:700;border-radius:12px;padding:14px 16px;text-align:center;z-index:80}
 .toast.err{background:var(--pink);color:#fff}
 .spin{width:28px;height:28px;border-radius:50%;border:4px solid var(--surface-2);border-top-color:var(--pink);animation:sp 1s linear infinite;margin:24px auto}
@@ -696,6 +696,16 @@ var Engine = (function () {
     if (!/^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/.test(s)) return false;
     return addDays(s, 0) === s;
   }
+  /** R82(d): a birthday that exists: 31/02 never, 29/02 only without a year or in a leap year. Blank day or month = not known (allowed). */
+  function validBirthday(day, month, year) {
+    var blank = function (v) { return v === undefined || v === null || String(v).trim() === ''; };
+    if (blank(day) || blank(month)) return true;
+    var d = Number(day), m = Number(month), y = Number(year);
+    if (blank(year) || !(y >= 1900 && y <= 2100) || y % 1) y = 2000; // no (or an odd imported) year: any year, so 29/02 is fine
+    if (!(d >= 1 && d <= 31 && m >= 1 && m <= 12) || d % 1 || m % 1) return false;
+    var p2 = function (n) { return (n < 10 ? '0' : '') + n; };
+    return validDay(y + '-' + p2(m) + '-' + p2(d));
+  }
   /** R75: the day the money was received: the row's paid_on (YYYY-MM-DD), else the KL date it was recorded (ts, rows before R75). */
   function payDate(p) {
     if (!p) return '';
@@ -935,7 +945,7 @@ var Engine = (function () {
     classAt: classAt, nextClass: nextClass, classDates: classDates, sessions: sessions, sessionsAround: sessionsAround, staffClass: staffClass,
     planMonth: planMonth, shownResult: shownResult, monthRange: monthRange, sessionStartMs: startMs, sessionEndMs: endMs, weekStart: weekStart, weekIndex: weekIndex, addDays: addDays, classStart: classStart,
     checkIn: checkIn, paymentOptions: paymentOptions, isImported: isImported,
-    ADV_MAX_MONTHS: ADV_MAX_MONTHS, addMonths: addMonths, validDay: validDay, payDate: payDate, defaultPlanMonth: defaultPlanMonth, splitSen: splitSen, monthShort: monthShort, advancePlan: advancePlan,
+    ADV_MAX_MONTHS: ADV_MAX_MONTHS, addMonths: addMonths, validDay: validDay, validBirthday: validBirthday, payDate: payDate, defaultPlanMonth: defaultPlanMonth, splitSen: splitSen, monthShort: monthShort, advancePlan: advancePlan,
     monthClose: monthClose, PREPAID_GOLIVE: PREPAID_GOLIVE, isPrepaidGoLive: isPrepaidGoLive,
     parseFormOption: parseFormOption, birthdayFromIC: birthdayFromIC, parseDob: parseDob,
     normName: normName, healthNote: healthNote, mapRegistrationHeaders: mapRegistrationHeaders,
@@ -1365,6 +1375,9 @@ if (typeof module !== 'undefined') module.exports = Engine;
 .emenu .ehint{font-size:13px;color:var(--muted)}
 .voided b,.voided .vx{text-decoration:line-through}
 .voided{opacity:.62}
+.bmonths{margin-top:4px;font-size:13px;color:var(--muted)}.bmonths summary{cursor:pointer;min-height:32px;display:flex;align-items:center;color:var(--ink);font-weight:600}
+.bmonths .bm{padding:2px 0 2px 12px}.bmonths .bm.gone{text-decoration:line-through;opacity:.7}
+.etag.old{border-color:var(--yellow,#f5c542);color:var(--yellow,#f5c542);flex:1 1 100%;text-align:center;padding:4px 10px;margin-top:6px}
 .etag{display:inline-block;font-size:11px;font-weight:700;letter-spacing:.04em;border-radius:999px;padding:1px 8px;border:1px solid var(--muted);color:var(--muted);white-space:normal;margin-top:3px}
 .etag.del{border-color:var(--pink);color:var(--pink)}
 .tstack{position:fixed;left:12px;right:12px;bottom:16px;max-width:480px;margin:0 auto;display:flex;flex-direction:column;gap:8px;z-index:90;pointer-events:none}
@@ -1407,9 +1420,14 @@ if (typeof module !== 'undefined') module.exports = Engine;
     }
     return stack;
   }
+  // R82(b): the same height also goes to the CSS variable --toast-h, which every drawer / sheet (their own scroll areas, e.g. the
+  //         Promotions drawer) adds to its bottom padding, so the last control (Save) can always be scrolled above the toasts.
   function pad() {
     var d = doc(); if (!d || !d.body || !stack) return;
-    d.body.style.paddingBottom = items.length ? ((stack.offsetHeight || items.length * 64) + 24) + 'px' : '';
+    var h = items.length ? ((stack.offsetHeight || items.length * 64) + 24) + 'px' : '';
+    d.body.style.paddingBottom = h;
+    var de = d.documentElement;
+    if (de && de.style && de.style.setProperty) { if (h) de.style.setProperty('--toast-h', h); else de.style.removeProperty('--toast-h'); }
   }
   function drop(it) {
     if (!it) return;
@@ -1506,7 +1524,46 @@ if (typeof module !== 'undefined') module.exports = Engine;
     var n = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
     return ms.map(function (ym, i) { var nx = ms[i + 1]; return n[+ym.slice(5, 7) - 1] + (!nx || nx.slice(0, 4) !== ym.slice(0, 4) ? ' ' + ym.slice(0, 4) : ''); }).join(', ');
   }
-  root.FDAEdit = { tag: tag, isGone: isGone, undoToast: undoToast, confirmBar: confirmBar, hideToast: hide, note: note, toasts: toasts, reasonBox: reasonBox, failed: failed, peggyFrom: peggyFrom, esc: esc,
+  // ---- R82(c): a payment in advance (bundle) is ONE row in every list: "Unlimited × 6 · Oct 2026–Mar 2027 · RM420.00", with its
+  //      months behind a <details>; one ⋯ (whole-bundle menu) and one "Make receipt" for the bundle.
+  function isVoid(r) { return !!r && (r.void === true || r.voided === true || String(r.void).toUpperCase() === 'TRUE'); }
+  var MON = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  function mShort(ym) { ym = String(ym || ''); return /^\d{4}-\d{2}/.test(ym) ? MON[+ym.slice(5, 7) - 1] + ' ' + ym.slice(0, 4) : ym; }
+  function bid(r) { return String((r && (r.bundle_id || r.bundleId)) || ''); }
+  /** list (in display order) -> [{bundle, rows}]: rows of one bundle (2+ in the list) at the place of its first row, by month */
+  function groupBundles(list) {
+    var out = [], at = {};
+    (list || []).forEach(function (r) {
+      var b = bid(r);
+      if (!b) { out.push({ bundle: '', rows: [r] }); return; }
+      if (at[b] === undefined) { at[b] = out.length; out.push({ bundle: b, rows: [] }); }
+      out[at[b]].rows.push(r);
+    });
+    out.forEach(function (g) {
+      if (g.bundle && g.rows.length < 2) g.bundle = '';
+      if (g.bundle) g.rows.sort(function (a, b) { return String(a.month) < String(b.month) ? -1 : String(a.month) > String(b.month) ? 1 : 0; });
+    });
+    return out;
+  }
+  /** refute R82(c): months a bundle delete voided while earlier months stay paid -> the grouped row still offers Restore */
+  function bundleRestorable(rows) { return (rows || []).some(function (r) { return isVoid(r) && /^Bundle deleted: /.test(String(r.void_reason || r.voidReason || '')); }); }
+  function bundleGone(rows) { return (rows || []).length > 0 && rows.every(isVoid); }
+  /** the live months (all months when every month is deleted) */
+  function bundleLive(rows) { var live = (rows || []).filter(function (r) { return !isVoid(r); }); return live.length ? live : (rows || []).slice(); }
+  /** "Unlimited × 6 · Oct 2026–Mar 2027 · RM420.00" (deleted months not counted) */
+  function bundleTitle(rows, kindLabel, money) {
+    var use = bundleLive(rows), ms = use.map(function (r) { return String(r.month); }).sort(), sen = 0;
+    (rows || []).forEach(function (r) { if (!isVoid(r)) sen += Math.round(Number(r.amount || 0) * 100); });
+    return String(kindLabel) + ' × ' + use.length + ' · ' + mShort(ms[0]) + (ms.length > 1 ? '–' + mShort(ms[ms.length - 1]) : '') + ' · ' + money(sen / 100);
+  }
+  /** the expandable month list of a bundle */
+  function bundleMonthsHtml(rows, money) {
+    return '<details class="bmonths"><summary>Show the ' + rows.length + ' months</summary>' + rows.map(function (r) {
+      var reb = Number(r.rebate) > 0 ? ' (' + (r.promo_id ? 'promo ' : 'rebate ') + money(Number(r.rebate)) + ')' : '';
+      return '<div class="bm' + (isVoid(r) ? ' gone' : '') + '">' + esc(mShort(r.month)) + ' · ' + esc(money(Number(r.amount || 0))) + esc(reb) + (isVoid(r) ? ' · deleted' : '') + '</div>';
+    }).join('') + '</details>';
+  }
+  root.FDAEdit = { groupBundles: groupBundles, bundleTitle: bundleTitle, bundleMonthsHtml: bundleMonthsHtml, bundleGone: bundleGone, bundleRestorable: bundleRestorable, bundleLive: bundleLive, tag: tag, isGone: isGone, undoToast: undoToast, confirmBar: confirmBar, hideToast: hide, note: note, toasts: toasts, reasonBox: reasonBox, failed: failed, peggyFrom: peggyFrom, esc: esc,
     bundleOf: bundleOf, bundlePatches: bundlePatches, bundleMonths: bundleMonths };
 })(typeof window !== 'undefined' ? window : globalThis);
 </script>
@@ -2353,6 +2410,7 @@ ACT.joinSave = function(b){
   if (joinOffline()) { joinBtn(); return; }
   [['name','name'],['sex','sex'],['dob','date of birth'],['phone','mobile number'],['emergency_name','emergency contact name'],['emergency_phone','emergency contact number']].forEach(function(p){ if (!String(J[p[0]] || '').trim()) miss.push(p[1]); });
   if (miss.length) { $('jn_err').innerHTML = '<div class="error">Please fill in: ' + esc(miss.join(', ')) + '.</div>'; return; }
+  if (!Engine.validDay(J.dob) || J.dob > todayStr() || J.dob < '1900-01-01') { $('jn_err').innerHTML = '<div class="error">The date of birth is not a real date. Please choose it again.</div>'; return; } /* R82(d) */
   if (!J.agreed) { $('jn_err').innerHTML = '<div class="error">The member must agree to the Terms &amp; Conditions.</div>'; return; }
   b.disabled = true; b.textContent = 'Saving…';
   var form = {}; ['name','sex','id_type','id_no','dob','phone','emergency_name','emergency_phone','physical_limits','allergies','other_illness'].forEach(function(k){ form[k] = J[k]; });
@@ -2685,6 +2743,7 @@ ACT.memSave = function(){
   var code = S.open.code, p = { requestId: rid() };
   MFIELDS.concat([['address'],['emergency_name'],['emergency_phone'],['physical_limits'],['allergies'],['other_illness'],['status'],['notes']]).forEach(function(f){ p[f[0]] = val('mf_' + f[0]); });
   if (S.open.ic) p.id_no = val('mf_id_no'); /* a masked IC is never sent back */
+  if (!Engine.validBirthday(p.bday_day, p.bday_month, p.bday_year)) return toast('That birthday is not a real date.', true); /* R82(d) */
   p.trial_used = $('mf_trial_used').checked;
   run(W('partners_saveMember', code, p)).then(function(r){ if (!r) return; S.mem.list = null; if (S.tab === 'members') loadMembers(); syncSoon();
     if (r.unchanged || !r.before || !Object.keys(r.before).length) { toast('Saved'); return; }
@@ -2808,6 +2867,7 @@ CHG.ex_rep = function(t){ if (t.value) { var m = t.value.slice(0, 7); if (PL.cou
 ACT.calAddGo = function(b){
   var ch = { type: 'EXTRA', date: val('ex_date'), start: val('ex_start'), end: val('ex_end'), countsForMonth: val('ex_cf'), replaces: val('ex_rep'), note: val('ex_note'), requestId: RID.extra };
   if (!ch.date) return toast('Choose the date', true);
+  if (!Engine.validDay(val('ex_date'))) return toast('That date does not exist. Please choose it again.', true); /* R82(d) */
   b.disabled = true;
   run(W('partners_classChange', ch)).then(function(r){
     b.disabled = false; if (!r) return;
@@ -2842,9 +2902,12 @@ function drawSession(){
     if (it.guest) it.payRow = pGuestPay((S.store && S.store.get('attendance') || {})[x.attId], x.name, d.classKey.slice(0, 10)) || (d.payments || []).filter(function(p){ return !p.code && p.name === x.name; }).map(function(p){ return LP[p.payId] || { pay_id: p.payId, amount: p.amount, method: p.method, received_by: p.received_by }; })[0];
     return '<div class="item' + (x.voided ? ' voided' : '') + '"><div class="grow"><b>' + esc(x.name) + '</b> <small>' + esc(x.code) + '</small><br><small>' + esc(x.via || '') + (x.time ? ' · ' + esc(x.time) : '') + (x.note ? ' · ' + esc(x.note) : '') + '</small> ' + ptag(it.row) + '</div>' + pillHtml(x.voided ? 'VOID' : x.result) + pmore(it) + pslot(it) + '</div>';
   }).join('');
-  var pays = (d.payments || []).map(function(p){
-    var row = LP[p.payId] || { pay_id: p.payId, code: p.code, month: p.month, kind: p.kind, amount: p.amount, rebate: p.rebate, method: p.method, received_by: p.received_by, void: p.voided, void_reason: p.voidReason, edited_by: p.editedBy, ts: d.classKey.slice(0, 10) + 'T00:00:00+08:00' };
-    var it = { kind: 'pay', id: p.payId, code: p.code, guest: !p.code, void: !!p.voided, name: p.name, row: row, payRow: row };
+  var payRow = function(p){ return LP[p.payId] || { pay_id: p.payId, code: p.code, month: p.month, kind: p.kind, amount: p.amount, rebate: p.rebate, method: p.method, received_by: p.received_by, void: p.voided, void_reason: p.voidReason, edited_by: p.editedBy, bundle_id: p.bundleId || '', ts: d.classKey.slice(0, 10) + 'T00:00:00+08:00' }; };
+  /* R82(c): a payment in advance received that day = ONE row (its months behind "Show the N months") */
+  var pays = FDAEdit.groupBundles((d.payments || []).map(function(p){ return Object.assign({}, p, { bundle_id: p.bundleId || '', void: !!p.voided }); })).map(function(g){
+    var p = g.bundle ? FDAEdit.bundleLive(g.rows)[0] : g.rows[0], row = payRow(p), gone = g.bundle ? FDAEdit.bundleGone(g.rows) : !!p.voided;
+    var it = { kind: 'pay', id: p.payId, code: p.code, guest: !p.code, void: gone, name: p.name, row: row, payRow: row, bundleRestore: !!g.bundle && !gone && FDAEdit.bundleRestorable(g.rows) };
+    if (g.bundle) return '<div class="item' + (gone ? ' voided' : '') + '"><div class="grow"><b>' + esc(p.name) + '</b><br><small class="vx">' + esc(FDAEdit.bundleTitle(g.rows, KIND[p.kind] || p.kind, rm)) + ' · ' + esc(p.method) + ' · ' + esc(p.received_by) + '</small> ' + ptag(row) + FDAEdit.bundleMonthsHtml(g.rows, rm) + '</div>' + pmore(it) + pslot(it) + '</div>';
     return '<div class="item' + (p.voided ? ' voided' : '') + '"><div class="grow"><b>' + esc(p.name) + '</b><br><small class="vx">' + esc(KIND[p.kind] || p.kind) + ' · ' + esc(p.method) + ' · ' + esc(p.received_by) + (p.rebate ? ' · rebate ' + rm(p.rebate) : '') + '</small> ' + ptag(row) + '</div><span class="amt">' + rm(p.amount) + '</span>' + pmore(it) + pslot(it) + '</div>'; }).join('');
   var ctl;
   if (extra) ctl = '<div class="card"><h3>Extra class</h3><p class="sub">Counts for ' + esc(monthLabel(s.countsFor || d.classKey.slice(0, 7))) + (s.replaces ? ' · replaces ' + esc(classLabel(s.replaces)) : '') + (s.note ? ' · ' + esc(s.note) : '') + '</p>' +
@@ -2883,6 +2946,7 @@ ACT.exEditOpen = function(b, v, id){
 ACT.exEditNo = function(){ drawSession(); };
 ACT.exEditGo = function(b, v, id){
   var ch = { type: 'EDIT', changeId: id, date: val('xe_d'), start: val('xe_s'), end: val('xe_e'), countsForMonth: val('xe_cf'), note: val('xe_n'), requestId: rid() };
+  if (!Engine.validDay(val('xe_d'))) return toast('That date does not exist. Please choose it again.', true); /* R82(d) */
   b.disabled = true;
   run(W('partners_classChange', ch)).then(function(r){
     b.disabled = false; if (!r) return;
@@ -2931,9 +2995,8 @@ function loadMoney(){
 }
 CHG.mm = function(t){ S.moneyYm = t.value || S.moneyYm; S.money = null; $('mbody').innerHTML = spin(); loadMoney(); };
 function holderOpts(sel){ return opts((S.boot || {}).holders || [], sel || S.actor); }
-function drawMoney(){
-  var m = S.money, c = S.close, B = S.boot || {};
-  var pays = (m.payments || []).map(function(p){
+/* one payment row of the Money list */
+function moneyPayRow(p){
     var rcp = p.receipt_no ? (p.receipt_url ? '<a class="btn secondary sm" target="_blank" rel="noopener" href="' + esc(p.receipt_url) + '">Receipt ' + esc(p.receipt_no) + '</a>' : '<span class="pill grey">' + esc(p.receipt_no) + '</span>') :
       (p.void || !p.code ? '' : '<button class="btn secondary sm" type="button" data-act="mkReceipt" data-src="Payment" data-id="' + esc(p.pay_id) + '">Make receipt</button>');
     var lp = ((S.store && S.store.get('payments')) || {})[p.pay_id], row = Object.assign({}, p, lp ? { ts: lp.ts } : {});
@@ -2942,7 +3005,25 @@ function drawMoney(){
     return '<div class="item' + (p.void ? ' voided' : '') + '"><div class="grow"><b>' + esc(p.name) + '</b> <small>' + esc(p.code) + '</small><br><small class="vx">' + fmtD(p.date) + ' · ' + esc(KIND[p.kind] || p.kind) + forM + (p.bundle_id ? ' · paid ahead' : '') + ' · ' + esc(p.method) + ' · held by ' + esc(p.received_by) +
       (Number(p.rebate) > 0 ? ' · <span style="color:var(--yellow)">' + (Engine.isPrepaidGoLive(p) ? 'paid before go-live ' : p.promo_id ? 'promo ' : 'rebate ') + rm(p.rebate) + (p.rebate_reason ? ' (' + esc(p.rebate_reason) + ')' : '') + '</span>' : '') + '</small> ' + ptag(p) + '</div><span class="amt">' + rm(p.amount) + '</span>' + pmore(it) +
       '<div class="inline" id="pact_' + esc(p.pay_id) + '">' + rcp + '</div>' + pslot(it) + '</div>';
-  }).join('');
+}
+/* R82(c): a payment in advance (bundle) = ONE row: "Unlimited × 6 · Oct 2026–Mar 2027 · RM420.00", its months behind <details>,
+   one ⋯ (whole-bundle menu) and one receipt (any month's receipt is the bundle's receipt) */
+function moneyBundleRow(rows){
+  var live = FDAEdit.bundleLive(rows), p = live[0], gone = FDAEdit.bundleGone(rows), pre = Engine.isPrepaidGoLive(p);
+  var made = rows.filter(function(x){ return x.receipt_no; })[0];
+  var rcp = made ? (made.receipt_url ? '<a class="btn secondary sm" target="_blank" rel="noopener" href="' + esc(made.receipt_url) + '">Receipt ' + esc(made.receipt_no) + '</a>' : '<span class="pill grey">' + esc(made.receipt_no) + '</span>') :
+    (gone || pre || !p.code ? '' : '<button class="btn secondary sm" type="button" data-act="mkReceipt" data-src="Payment" data-id="' + esc(p.pay_id) + '">Make receipt</button>');
+  var lp = ((S.store && S.store.get('payments')) || {})[p.pay_id], row = Object.assign({}, p, lp ? { ts: lp.ts } : {});
+  var it = { kind: 'pay', id: p.pay_id, code: p.code, guest: false, void: gone, name: p.name, row: row, payRow: row, bundleRestore: !gone && FDAEdit.bundleRestorable(rows) };
+  var reb = 0; rows.forEach(function(x){ if (!x.void) reb += Math.round(Number(x.rebate || 0) * 100); });
+  return '<div class="item' + (gone ? ' voided' : '') + '"><div class="grow"><b>' + esc(p.name) + '</b> <small>' + esc(p.code) + '</small><br><small class="vx">' + esc(FDAEdit.bundleTitle(rows, KIND[p.kind] || p.kind, rm)) + ' · paid ' + fmtD(p.date) + ' · ' + esc(p.method) + ' · held by ' + esc(p.received_by) +
+    (reb > 0 ? ' · <span style="color:var(--yellow)">' + (pre ? 'paid before go-live ' : p.promo_id ? 'promo ' : 'rebate ') + rm(reb / 100) + '</span>' : '') + '</small> ' + ptag(p) + FDAEdit.bundleMonthsHtml(rows, rm) + '</div>' + pmore(it) +
+    '<div class="inline" id="pact_' + esc(p.pay_id) + '">' + rcp + '</div>' + pslot(it) + '</div>';
+}
+function moneyPayRows(list){ return FDAEdit.groupBundles(list).map(function(g){ return g.bundle ? moneyBundleRow(g.rows) : moneyPayRow(g.rows[0]); }).join(''); }
+function drawMoney(){
+  var m = S.money, c = S.close, B = S.boot || {};
+  var pays = moneyPayRows(m.payments || []);
   var oi = (m.otherIncome || []).map(function(o){ var rcp = o.void ? '' : o.receipt_no ? (o.receipt_url ? '<a class="btn secondary sm" target="_blank" rel="noopener" href="' + esc(o.receipt_url) + '">Receipt ' + esc(o.receipt_no) + '</a>' : '<span class="pill grey">' + esc(o.receipt_no) + '</span>') : '<button class="btn secondary sm" type="button" data-act="mkReceipt" data-src="OtherIncome" data-id="' + esc(o.inc_id) + '">Make receipt</button>';
     var it = { kind: 'inc', id: o.inc_id, void: !!o.void, name: o.from_name || o.description, row: o };
     return '<div class="item' + (o.void ? ' voided' : '') + '"><div class="grow"><b>' + esc(o.from_name ? o.from_name + ' – ' + (o.description || o.type) : o.description) + '</b><br><small class="vx">' + fmtD(o.date) + ' · ' + esc(o.type) + ' · ' + esc(o.method) + ' · held by ' + esc(o.received_by) + '</small> ' + ptag(o) + '</div><span class="amt">' + rm(o.amount) + '</span>' + pmore(it) + '<div class="inline">' + rcp + '</div>' + pslot(it) + '</div>'; }).join('');
@@ -3004,8 +3085,10 @@ ACT.mnPick = function(b, v){
 ACT.mkReceipt = function(b, v, id){ b.disabled = true; run(W('partners_receipt', b.getAttribute('data-src'), id), 'Receipt made').then(function(r){ if (r) loadMoney(); else b.disabled = false; }); };
 /* R67: Undo of an add = delete it (reason "Undo"); the row stays in the list struck through */
 function undoAdd(type, id, msg){ FDAEdit.undoToast(msg, function(){ run(W('partners_change', { type: type, action: 'delete', id: id, reason: 'Undo', requestId: rid() }), 'Undone ✓').then(function(x){ if (x) loadMoney(); }); }); }
-ACT.oiAdd = function(b){ b.disabled = true; RID.oi = RID.oi || rid(); run(W('partners_addOtherIncome', { date: val('oi_date'), type: val('oi_type'), from: val('oi_from'), description: val('oi_desc'), amount: Number(val('oi_amt')), method: val('oi_method'), received_by: val('oi_by'), requestId: RID.oi })).then(function(r){ if (r) { RID.oi = null; loadMoney(); undoAdd('income', r.row.inc_id, 'Income added'); if (r.warning) toast(r.warning, true); } else b.disabled = false; }); };
+ACT.oiAdd = function(b){ if (!Engine.validDay(val('oi_date'))) return toast('That date does not exist. Please choose it again.', true); /* R82(d) */
+  b.disabled = true; RID.oi = RID.oi || rid(); run(W('partners_addOtherIncome', { date: val('oi_date'), type: val('oi_type'), from: val('oi_from'), description: val('oi_desc'), amount: Number(val('oi_amt')), method: val('oi_method'), received_by: val('oi_by'), requestId: RID.oi })).then(function(r){ if (r) { RID.oi = null; loadMoney(); undoAdd('income', r.row.inc_id, 'Income added'); if (r.warning) toast(r.warning, true); } else b.disabled = false; }); };
 ACT.exAdd = function(b){
+  if (!Engine.validDay(val('xp_date'))) return toast('That date does not exist. Please choose it again.', true); /* R82(d) */
   b.disabled = true; RID.ex = RID.ex || rid();
   fileToB64($('xp_file').files[0]).then(function(f){
     return run(W('partners_addExpense', { date: val('xp_date'), category: val('xp_cat'), description: val('xp_desc'), amount: Number(val('xp_amt')), paid_by: val('xp_by'), requestId: RID.ex }, f ? f.b64 : '', f ? f.name : '', f ? f.mime : ''));
@@ -3206,6 +3289,9 @@ function drawSettings(){
       '<p class="ph-hint">PINs set: ' + Object.keys(pins).map(function(p){ return esc(p) + ' ' + (pins[p] ? '✓' : '—'); }).join(' · ') + '</p></div>' +
     '<div class="card"><h3>Peggy’s PIN</h3><p class="sub">' + (s.pinSet ? 'A PIN is set.' : 'No PIN set yet.') + ' Peggy uses it to open the staff console. 4 to 6 digits. Changing it signs her out.</p><div class="inline"><input id="pin" type="password" inputmode="numeric" maxlength="6" autocomplete="new-password" placeholder="New PIN for Peggy" aria-label="New PIN for Peggy"><button class="btn sm" type="button" data-act="pinSave">Set Peggy’s PIN</button></div></div>' +
     '<div class="card"><h3>Data health</h3><p class="sub">Checks that dates, months and times are stored as text and nothing is missing. No personal data is shown.</p><div class="bar"><button class="btn sm" type="button" data-act="hcRun">Check data</button><button class="btn secondary sm" type="button" data-act="hcRepair">Repair data</button></div><div id="hcOut"></div></div>' +
+    '<div class="card"><h3>System health</h3><p class="sub">Slow screens (over 2 s) and errors from the Log tab. No personal data. Copy the summary and paste it to Claude.</p><div class="seg">' +
+      [[7, 'Last 7 days'], [30, 'Last 30 days']].map(function(c){ return '<button class="chip" type="button" data-act="shDays" data-v="' + c[0] + '" aria-pressed="' + (!!S.sysHealth && S.sysHealth.days === c[0]) + '">' + c[1] + '</button>'; }).join('') +
+      '</div><div class="bar"><button class="btn secondary sm" type="button" data-act="shCopy">Copy summary</button></div><div id="shOut">' + (S.sysHealth ? shHtml(S.sysHealth) : '') + '</div></div>' +
     '<div class="card"><h3>Automations</h3><p class="sub">Daily 8 am job (monthly roster, summary email, cache warm-up), 6 pm warm-up before class, new registrations from the Google Form. Safe to press again.</p><p><button class="btn sm" type="button" data-act="trig">Install triggers</button></p><div id="trigOut"></div></div>' +
     '<div class="card"><h3>Import from Google Forms</h3><p class="sub">Safe to run again; existing members are skipped. Paste a form/sheet id or its link.</p><label for="im_a">Attendance form (member list)</label><input id="im_a" value="' + esc(s.importIds.attendanceFormId) + '"><label for="im_r">Registration responses sheet</label><input id="im_r" value="' + esc(s.importIds.registrationSheetId) + '"><label for="im_c">This month’s attendance form (optional)</label><input id="im_c"><label for="im_s">This month’s attendance responses sheet</label><input id="im_s" value="' + esc(s.importIds.currentMonthSheetId) + '"><p><button class="btn sm" type="button" data-act="imRun">Run import</button></p><div id="imOut"></div></div>' +
     '</div></div>';
@@ -3243,6 +3329,39 @@ function hcRepairGo(b){
   b.disabled = true; $('hcOut').innerHTML = spin();
   run(W('partners_repairData'), 'Repair done').then(function(r){ b.disabled = false; $('hcOut').innerHTML = r ? '<div class="okline" style="margin-top:10px"><b>Repaired.</b><ul style="margin:6px 0 0;padding-left:18px">' + PL.repairLines(r).map(function(x){ return '<li>' + esc(x) + '</li>'; }).join('') + '</ul></div>' : ''; if (r) syncSoon(); });
 }
+/* R83: System health (partners_systemHealth, cached 5 min on the server): 7 / 30 days, "Copy summary" = the server's plain text */
+ACT.shDays = function(b, v){ shLoad(+v === 30 ? 30 : 7); };
+function shLoad(days){
+  if (!$('shOut')) return;
+  $('shOut').innerHTML = spin();
+  document.querySelectorAll('[data-act="shDays"]').forEach(function(c){ c.setAttribute('aria-pressed', String(+c.getAttribute('data-v') === days)); });
+  api('partners_systemHealth', days).then(function(h){ S.sysHealth = h; if (S.tab === 'settings' && $('shOut')) $('shOut').innerHTML = shHtml(h); }, function(e){ if ($('shOut')) $('shOut').innerHTML = ''; handleErr(e); });
+}
+function shHtml(h){
+  if (!h || !h.ok) return '<div class="error">' + esc((h && h.error) || 'Could not read the Log.') + '</div>';
+  var s1 = function(ms){ return (Math.round(ms / 100) / 10).toFixed(1) + ' s'; };
+  var line = function(t, sub, bad){ return '<div class="item"><div class="grow"><b>' + esc(t) + '</b>' + (sub ? '<br><small>' + esc(sub) + '</small>' : '') + '</div>' + (bad ? '<span class="pill unpaid">' + esc(bad) + '</span>' : '') + '</div>'; };
+  var out = '<span class="label" style="display:block;margin-top:12px">Slow calls (over 2 s)</span>' + ((h.slow || []).map(function(x){ return line(x.fn, 'median ' + s1(x.medianMs) + ' · worst ' + s1(x.worstMs), x.count + ' slow'); }).join('') || '<p class="muted">None.</p>');
+  out += '<span class="label" style="display:block;margin-top:12px">Errors</span>' + ((h.errors || []).map(function(x){ return line(x.fn, (x.message ? x.message + ' · ' : '') + (x.firstLabel ? 'first ' + x.firstLabel + ' · last ' + x.lastLabel : ''), x.count + (x.count === 1 ? ' error' : ' errors')); }).join('') || '<p class="muted">None.</p>');
+  var m = h.maint || {}, l = h.lockouts || {};
+  out += '<div class="hl" style="margin-top:10px"><div class="' + (m.count ? 'bad' : '') + '">Maintenance errors: ' + (m.count ? m.count + (m.lastLabel ? ' · last ' + esc(m.lastLabel) : '') + (m.message ? ' · ' + esc(m.message) : '') : 'none') + '</div>' +
+    '<div>Login lockouts: ' + (l.count ? l.count + (l.lastLabel ? ' · last ' + esc(l.lastLabel) : '') : 'none') + '</div><div>Join page blocked: ' + ((h.joinBlocked || {}).count || 'none') + '</div>' +
+    '<div>Queue retries: ' + ((h.retries || {}).logged ? h.retries.count : 'not logged on the server') + '</div><div class="ph-hint">' + h.scanned + ' log rows read' + (h.capped ? ' (the last 5,000 only)' : '') + '</div></div>';
+  return out + '<details style="margin-top:10px"><summary>Summary text</summary><pre class="t" style="white-space:pre-wrap">' + esc(h.summary || '') + '</pre></details>';
+}
+/* copy plain text (clipboard API; a hidden textarea + execCommand on older phones) */
+function shCopyText(t){
+  var old = function(){ return new Promise(function(res, rej){
+    try { var a = document.createElement('textarea'); a.value = t; a.setAttribute('readonly', ''); a.style.position = 'fixed'; a.style.opacity = '0'; document.body.appendChild(a); a.select(); var ok = document.execCommand('copy'); document.body.removeChild(a); if (ok) res(); else rej(new Error('copy')); } catch (e) { rej(e); }
+  }); };
+  if (navigator.clipboard && navigator.clipboard.writeText) return navigator.clipboard.writeText(t).then(null, old); /* blocked (permissions / embedded view) -> the old way */
+  return old();
+}
+ACT.shCopy = function(){
+  var h = S.sysHealth;
+  if (!h || !h.summary) return toast('Choose “Last 7 days” or “Last 30 days” first.', true);
+  shCopyText(h.summary).then(function(){ toast('Summary copied — paste it to Claude'); }, function(){ toast('Could not copy. Open “Summary text” and copy it by hand.', true); });
+};
 ACT.trig = function(b){
   b.disabled = true;
   run(W('partners_installTriggers'), 'Triggers installed').then(function(r){ b.disabled = false; if (!r) return; $('trigOut').innerHTML = '<div class="hl">' + [['Daily 8 am job', r.daily], ['6 pm warm-up', r.prewarm], ['New registrations (form)', r.form]].map(function(x){ return '<div class="' + (x[1] ? '' : 'bad') + '">' + esc(x[0]) + ': ' + (x[1] ? 'on' : 'not on') + '</div>'; }).join('') + ((r.messages || []).length ? '<div>' + (r.messages || []).map(esc).join('<br>') + '</div>' : '') + '</div>'; });
@@ -3289,7 +3408,7 @@ function pmenuHtml(it){
     if (m === 'editBundle') { var br = pBundleRow(it);
       return h + '<p class="ehint">' + esc(bm) + '. The plan, months and price can’t change: delete it and record a new one.</p><div class="erow"><div><label for="pbM">Method</label><select id="pbM">' + opts((S.boot || {}).methods || ['Cash'], br.method) + '</select></div><div><label for="pbB">Received by</label><select id="pbB">' + opts((S.boot || {}).holders || [S.actor], br.received_by || S.actor) + '</select></div></div>' + pOnField('pbD', Engine.payDate(br)) +
         (br.receipt_no ? '<p class="ehint">Receipt ' + esc(br.receipt_no) + ' will be voided. Make a new one after saving.</p>' : '') + '<div class="eerr" id="pmErr"></div>' + btns([eb('bundleGo', 'Save for every month', ''), eb('close', 'Cancel')]) + '</div>'; }
-    return h + '<p class="ehint">Paid ahead together: ' + esc(bm) + '. Change or delete the whole bundle.</p>' + btns([eb('editBundle', 'Edit whole bundle'), eb('delete', 'Delete', 'del'), eb('close', 'Close')]) + '</div>';
+    return h + '<p class="ehint">Paid ahead together: ' + esc(bm) + '. Change or delete the whole bundle.</p>' + btns([eb('editBundle', 'Edit whole bundle'), eb('delete', 'Delete', 'del')].concat(it.bundleRestore ? [eb('restore', 'Restore deleted months', '')] : [], [eb('close', 'Close')])) + '</div>';
   }
   if (m === 'delete') return h + FDAEdit.reasonBox('pmWhy') + '<div class="eerr" id="pmErr"></div>' + btns([eb('delGo', 'Delete' + (it.guest ? ' guest + payment' : ''), 'del'), eb('close', 'Keep')]) + '</div>';
   if (m === 'move') {
@@ -3414,7 +3533,7 @@ var PPE = null;
 function pPayBefore(p, month){ return local('payments').filter(function(x){ return x.pay_id !== p.pay_id && x.code === p.code && x.month === month && !x.void && (String(x.ts) + '|' + x.pay_id) < (String(p.ts) + '|' + p.pay_id); }); }
 /* R75: "Paid on" in the edit forms (partners: any past date, never the future) */
 function pOnField(id, v){ return '<label for="' + id + '">Paid on</label><input type="date" id="' + id + '" max="' + todayStr() + '" value="' + esc(v || todayStr()) + '">'; }
-function pOnErr(v){ v = String(v || ''); if (!/^\d{4}-\d{2}-\d{2}$/.test(v)) return 'Choose the "Paid on" date.'; return v > todayStr() ? 'The "Paid on" date can’t be in the future.' : ''; }
+function pOnErr(v){ v = String(v || ''); if (!Engine.validDay(v)) return 'Choose the "Paid on" date.'; return v > todayStr() ? 'The "Paid on" date can’t be in the future.' : ''; }
 function pPayForm(it){
   var p = it.row, B = S.boot || {}, m = memberLocal(p.code) || {}, set = settingsLocal();
   if (!PPE || PPE.id !== p.pay_id) PPE = { id: p.pay_id, month: p.month, kind: p.kind, method: p.method, by: p.received_by, rebate: Number(p.rebate) || 0, reason: p.rebate_reason || '', paidOn: Engine.payDate(p) };
@@ -3454,6 +3573,7 @@ function pIncForm(it){
 }
 function pIncSave(it, err){
   var a = Number(val('piA')); if (!(a > 0)) return err('Enter an amount above RM0.00');
+  if (!Engine.validDay(val('piD'))) return err('That date does not exist. Please choose it again.'); /* R82(d) */
   pchange({ type: 'income', action: 'edit', id: it.id, patch: { date: val('piD'), type: val('piT'), from: val('piF'), description: val('piX'), amount: a, method: val('piM'), receivedBy: val('piB') } });
 }
 function pExpForm(it){
@@ -3466,6 +3586,7 @@ function pExpForm(it){
 }
 function pExpSave(it, err){
   var a = Number(val('peA')); if (!(a > 0)) return err('Enter an amount above RM0.00');
+  if (!Engine.validDay(val('peD'))) return err('That date does not exist. Please choose it again.'); /* R82(d) */
   var patch = { date: val('peD'), category: val('peC'), description: val('peX'), amount: a, paidBy: val('peB') }, f = $('peF') && $('peF').files[0];
   fileToB64(f).then(function(file){
     if (file) { patch.fileBase64 = file.b64; patch.fileName = file.name; patch.mime = file.mime; }
@@ -3486,13 +3607,21 @@ function memberActivity(){
   var box = $('memAct'), m = S.open && S.open.m; if (!box || !m) return;
   var ym = S.ym, prev = addMonth(ym, -1);
   var att = local('attendance').filter(function(a){ return a.code === m.code && (a.plan_month === ym || a.plan_month === prev) && !a._local; }).sort(function(a, b){ return a.class_key < b.class_key ? 1 : -1; });
-  var pays = local('payments').filter(function(p){ return p.code === m.code && (p.month === ym || p.month === prev) && !p._local; }).sort(function(a, b){ return a.ts < b.ts ? 1 : -1; });
+  var all = local('payments').filter(function(p){ return p.code === m.code && !p._local; });
+  var shown = {}; all.forEach(function(p){ if ((p.month === ym || p.month === prev) && p.bundle_id) shown[p.bundle_id] = 1; });
+  /* R82(c): a bundle touching these months is shown whole (one row, its months behind "Show the N months") */
+  var pays = all.filter(function(p){ return p.month === ym || p.month === prev || (p.bundle_id && shown[p.bundle_id]); }).sort(function(a, b){ return a.ts < b.ts ? 1 : a.ts > b.ts ? -1 : 0; });
   var h = '<span class="label">Check-ins (last month and this month)</span>' + (att.map(function(a){
     var it = { kind: 'att', id: a.att_id, code: a.code, guest: false, result: a.result, classKey: a.class_key, name: m.name, row: a };
     return '<div class="item' + (a.result === 'VOID' ? ' voided' : '') + '"><div class="grow"><b>' + esc(classLabel(a.class_key)) + '</b><br><small>' + esc(a.via || '') + '</small> ' + ptag(a) + '</div>' + pillHtml(a.result) + pmore(it) + pslot(it) + '</div>';
   }).join('') || '<p class="muted">None.</p>');
-  h += '<span class="label" style="display:block;margin-top:12px">Payments</span>' + (pays.map(function(p){
-    var it = { kind: 'pay', id: p.pay_id, code: p.code, guest: false, void: !!p.void, name: m.name, row: p };
+  h += '<span class="label" style="display:block;margin-top:12px">Payments</span>' + (FDAEdit.groupBundles(pays).map(function(g){
+    if (g.bundle) {
+      var b = FDAEdit.bundleLive(g.rows)[0], gone = FDAEdit.bundleGone(g.rows);
+      var bit = { kind: 'pay', id: b.pay_id, code: b.code, guest: false, void: gone, name: m.name, row: b }; bit.bundleRestore = !gone && FDAEdit.bundleRestorable(g.rows);
+      return '<div class="item' + (gone ? ' voided' : '') + '"><div class="grow"><b>' + esc(FDAEdit.bundleTitle(g.rows, KIND[b.kind] || b.kind, rm)) + '</b><br><small class="vx">' + esc(b.method) + ' · ' + esc(b.received_by) + '</small> ' + ptag(b) + FDAEdit.bundleMonthsHtml(g.rows, rm) + '</div>' + pmore(bit) + pslot(bit) + '</div>';
+    }
+    var p = g.rows[0], it = { kind: 'pay', id: p.pay_id, code: p.code, guest: false, void: !!p.void, name: m.name, row: p };
     return '<div class="item' + (p.void ? ' voided' : '') + '"><div class="grow"><b>' + esc(KIND[p.kind] || p.kind) + ' · ' + esc(monthLabel(p.month)) + '</b><br><small class="vx">' + rm(p.amount) + ' · ' + esc(p.method) + ' · ' + esc(p.received_by) + '</small> ' + ptag(p) + '</div>' + pmore(it) + pslot(it) + '</div>';
   }).join('') || '<p class="muted">None.</p>');
   box.innerHTML = h;

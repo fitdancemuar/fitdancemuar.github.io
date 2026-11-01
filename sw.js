@@ -7,7 +7,7 @@
      used when the network has not answered within NET_WAIT ms - the page then sees the newer build via version.json and reloads);
    - the cache name carries the build id, so a new build installs a new shell (fetched past the HTTP cache) and old caches go;
    - the new worker takes over at once (skipWaiting + clients.claim). */
-var VERSION = "ce4f68abd152";
+var VERSION = "858abc478014";
 var SHELL = ["./","./manifest.webmanifest","./staff/","./staff/manifest.webmanifest","./partners/","./partners/manifest.webmanifest","./join/","./icons/icon-32.png","./icons/icon-180.png","./icons/icon-192.png","./icons/icon-512.png","./icons/icon-512-maskable.png"];
 var CACHE = 'fda-shell-' + VERSION;
 var NET_WAIT = 4000;

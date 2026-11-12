@@ -13,7 +13,7 @@
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="apple-touch-icon" href="../icons/icon-180.png">
 <link rel="icon" type="image/png" sizes="32x32" href="../icons/icon-32.png">
-<script>window.FDA_API_URL="https://script.google.com/macros/s/AKfycbxDQG-e_sMUr8fYg9NZgUc13STtl1pJ01DpWMI0AWWAHq4i9cCa40Vwm1RhOaPstGzr/exec";window.FDA_BUILD="858abc478014";</script>
+<script>window.FDA_API_URL="https://script.google.com/macros/s/AKfycbxDQG-e_sMUr8fYg9NZgUc13STtl1pJ01DpWMI0AWWAHq4i9cCa40Vwm1RhOaPstGzr/exec";window.FDA_BUILD="9b1da21cb4e0";</script>
 <script>
 /* R66 - google.script.run over fetch, for the static pages on fitdancemuar.github.io (inlined into each page by deploy/build-site.js).
    Same chaining API as Apps Script: google.script.run.withSuccessHandler(ok).withFailureHandler(fail).withUserObject(o).fn(...args).
@@ -1622,7 +1622,8 @@ if (typeof module !== 'undefined') module.exports = Engine;
 </script>
 
 <!-- R81: the member QR card (white card, stripe, QR error level H with the logo, code + name, FIT DANCE ACADEMY), shared by the
-     partners' member drawer and Peggy's Members tab. Needs qrcode-generator (cdnjs) on the page; the logo is the header image. -->
+     partners' member drawer, Peggy's Members tab and (R85) the Join success screen. Needs qrcode-generator (cdnjs) on the page;
+     the logo is the header image. R85: FDAShare.shareCard sends the card PNG + text through the phone's share sheet. -->
 <script>
 window.FDACard = (function(){
 function spaced(g, text, cx, y, gap){
@@ -1637,6 +1638,7 @@ function logoImg(){ return document.querySelector('.hdr img') || document.queryS
 function draw(cv, link, code, name){
   var g = cv.getContext('2d'), W_ = cv.width, H_ = cv.height;
   function paint(){
+    cv._fdaQr = false; /* refute R85: true only once the QR itself is on the card */
     g.clearRect(0, 0, W_, H_);
     g.fillStyle = '#fff'; rrect(g, 0, 0, W_, H_, 56); g.fill();
     g.save(); rrect(g, 0, 0, W_, H_, 56); g.clip();
@@ -1651,6 +1653,7 @@ function draw(cv, link, code, name){
       var img = logoImg(), ls = Math.round(size * 0.24), lx = ox + (size - ls) / 2, ly = oy + (size - ls) / 2;
       g.fillStyle = '#fff'; rrect(g, lx - 10, ly - 10, ls + 20, ls + 20, 22); g.fill();
       try { g.save(); rrect(g, lx, ly, ls, ls, 16); g.clip(); g.drawImage(img, lx, ly, ls, ls); g.restore(); } catch (e) { g.restore(); }
+      cv._fdaQr = true;
     } else {
       g.fillStyle = '#000'; g.font = '28px sans-serif'; g.textAlign = 'center'; g.fillText('QR library unavailable', W_ / 2, oy + 200);
     }
@@ -1660,6 +1663,7 @@ function draw(cv, link, code, name){
     while (g.measureText(nm).width > W_ - 120 && fs > 28) { fs -= 2; g.font = '700 ' + fs + 'px Figtree,system-ui,sans-serif'; }
     g.fillText(nm, W_ / 2, 1010);
     g.fillStyle = '#6e6880'; g.font = '600 28px Figtree,system-ui,sans-serif'; spaced(g, 'FIT DANCE ACADEMY', W_ / 2, 1082, 9);
+    if (window.FDAShare) window.FDAShare.prepare(cv); /* R85: the PNG is ready before the tap (iOS: share() inside the gesture) */
   }
   paint();
   try { if (document.fonts && document.fonts.load) Promise.all([document.fonts.load('130px "Bebas Neue"'), document.fonts.load('700 54px Figtree')]).then(paint); } catch (e) {}
@@ -1672,7 +1676,85 @@ function download(cv, code){
     document.body.appendChild(a); a.click(); setTimeout(function(){ URL.revokeObjectURL(a.href); a.remove(); }, 500);
   }, 'image/png');
 }
-return { draw: draw, download: download };
+/* refute R85: the card has its QR code (the library loaded) - never share / send a card without it */
+function ready(cv){ return !!(cv && cv._fdaQr); }
+return { draw: draw, download: download, ready: ready };
+})();
+
+/* R85 "Send card on WhatsApp". wa.me links carry text only, so the card PNG goes through the phone's share sheet
+   (navigator.share with files) and the user picks WhatsApp -> the member. WhatsApp on iPhone drops the text when an image is
+   shared, so the text is copied to the clipboard first. Everything up to navigator.share() runs synchronously inside the tap
+   (iOS needs the user gesture): the PNG is made beforehand by prepare() (after every paint of the card), or, if that has not
+   finished yet, straight from the canvas (toDataURL, synchronous). No Web Share with files -> download the PNG + open the
+   wa.me text link + the hint "Attach the downloaded card". */
+window.FDAShare = (function(){
+  var COPIED = 'Message copied — paste it under the picture if it’s missing';
+  var HINT = 'Attach the downloaded card';
+  var NOQR = 'The QR code could not load yet. Check your internet and try again, or use “Text only”.';
+  var gen = 0;
+  /* make the PNG of a painted card now, in the background; kept on the canvas until the next paint */
+  function prepare(cv){
+    if (!cv) return;
+    var my = cv._fdaGen = ++gen; cv._fdaBlob = null;
+    try { if (cv.toBlob) cv.toBlob(function(b){ if (cv._fdaGen === my && b) cv._fdaBlob = b; }, 'image/png'); } catch (e) {}
+  }
+  /* synchronous PNG from a canvas (used when prepare() has not finished) */
+  function blobNow(cv){
+    var u = cv.toDataURL('image/png'), bin = atob(u.slice(u.indexOf(',') + 1)), a = new Uint8Array(bin.length);
+    for (var i = 0; i < bin.length; i++) a[i] = bin.charCodeAt(i);
+    return new Blob([a], { type: 'image/png' });
+  }
+  function blobOf(o){ if (o.blob) return o.blob; if (!o.canvas) return null; return o.canvas._fdaBlob || blobNow(o.canvas); }
+  /* the old way: a hidden textarea + execCommand (also when the clipboard API is blocked) */
+  function copyOld(t){
+    try { var a = document.createElement('textarea'); a.value = t; a.setAttribute('readonly', ''); a.style.position = 'fixed'; a.style.top = '0'; a.style.opacity = '0';
+      document.body.appendChild(a); a.select(); if (a.setSelectionRange) a.setSelectionRange(0, t.length); var ok = document.execCommand('copy'); document.body.removeChild(a); return !!ok; } catch (e) { return false; }
+  }
+  /* copy text; starts synchronously (inside the tap) and resolves true / false */
+  function copyText(t){
+    t = String(t || ''); if (!t) return Promise.resolve(false);
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) return navigator.clipboard.writeText(t).then(function(){ return true; }, function(){ return copyOld(t); });
+    } catch (e) {}
+    return Promise.resolve(copyOld(t));
+  }
+  function waText(text){ return 'https://wa.me/?text=' + encodeURIComponent(String(text || '')); }
+  function save(blob, name){
+    var a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name;
+    document.body.appendChild(a); a.click(); setTimeout(function(){ URL.revokeObjectURL(a.href); a.remove(); }, 1500);
+  }
+  /**
+   * shareCard({canvas | blob, fileName, text, title?, waUrl?, toast?(msg, err)}) - call it straight from the tap handler.
+   * waUrl = the wa.me link for the fallback (with the member's number); default wa.me/?text=<text>.
+   * -> Promise {mode: 'shared' | 'cancelled' | 'fallback', copied, url?}
+   */
+  function shareCard(o){
+    o = o || {};
+    var say = o.toast || function(){}, text = String(o.text || ''), name = o.fileName || 'card.png';
+    if (!o.blob && !(window.FDACard && window.FDACard.ready(o.canvas))) { say(NOQR, true); return Promise.resolve({ mode: 'noqr', copied: false }); } /* refute R85: no QR-less PNG */
+    var copying = copyText(text); /* 1. the text to the clipboard (does not use up the tap) */
+    var blob = null, file = null;
+    try { blob = blobOf(o); if (blob && typeof File === 'function') file = new File([blob], name, { type: 'image/png' }); } catch (e) { file = null; }
+    function fallback(){
+      var url = o.waUrl || waText(text);
+      try { if (blob) save(blob, name); } catch (e) {}
+      try { window.open(url, '_blank', 'noopener'); } catch (e) {}
+      say(HINT);
+      return copying.then(function(c){ return { mode: 'fallback', copied: c, url: url }; });
+    }
+    var can = false;
+    try { can = !!(file && navigator.share && navigator.canShare && navigator.canShare({ files: [file] })); } catch (e) { can = false; }
+    if (!can) return fallback();
+    var p;
+    try { p = navigator.share({ files: [file], text: text, title: o.title || 'FIT Dance card' }); } catch (e) { return fallback(); } /* 2. the share sheet */
+    return Promise.resolve(p).then(function(){
+      return copying.then(function(c){ say(c ? COPIED : 'Card sent. If the message is missing, tap “Text only”.'); return { mode: 'shared', copied: c }; });
+    }, function(e){
+      if (e && e.name === 'AbortError') return copying.then(function(c){ return { mode: 'cancelled', copied: c }; }); /* closed the sheet: say nothing */
+      return fallback();
+    });
+  }
+  return { shareCard: shareCard, prepare: prepare, copyText: copyText, waText: waText, COPIED: COPIED, HINT: HINT };
 })();
 </script>
 
@@ -2355,7 +2437,7 @@ function paintMember(){
       '<dt>Birthday</dt><dd>'+mbVal(mbDob(m))+'</dd><dt>Mobile</dt><dd>'+mbVal(m.phone)+'</dd><dt>Email</dt><dd>'+mbVal(m.email)+'</dd><dt>Address</dt><dd>'+mbVal(m.address)+'</dd>'+
       '<dt>Heard from</dt><dd>'+mbVal(m.referral)+'</dd><dt>Emergency</dt><dd>'+mbVal([m.emergency_name,m.emergency_phone].filter(function(x){return String(x||'').trim();}).join(' · '))+'</dd>'+
       '<dt>Physical limits</dt><dd>'+mbVal(m.physical_limits)+'</dd><dt>Allergies</dt><dd>'+mbVal(m.allergies)+'</dd><dt>Other illness</dt><dd>'+mbVal(m.other_illness)+'</dd><dt>Notes</dt><dd>'+mbVal(m.notes)+'</dd></dl></div>';
-    h+='<div class="card"><span class="label">QR card</span>'+(card.link?'<div class="mcard" style="margin-top:8px"><canvas id="mbCv" width="900" height="1140" aria-label="Member QR card"></canvas></div><div class="actions" style="margin-top:10px"><button type="button" class="btn secondary" id="mbDl">Download PNG</button>'+(card.waUrl?'<a class="btn good" href="'+esc(card.waUrl)+'" target="_blank" rel="noopener">WhatsApp</a>':'')+'</div>'+(card.waError?'<p class="muted" style="font-size:13px">'+esc(card.waError)+'</p>':'<p class="muted" style="font-size:13px;margin:0">WhatsApp opens with the welcome text and the member link. Attach the downloaded PNG yourself.</p>'):'<div class="notice">'+esc(card.waError||'No member link yet.')+'</div>')+'</div>';
+    h+='<div class="card"><span class="label">QR card</span>'+(card.link?'<div class="mcard" style="margin-top:8px"><canvas id="mbCv" width="900" height="1140" aria-label="Member QR card"></canvas></div><div class="actions" style="margin-top:10px">'+(card.waText?'<button type="button" class="btn good" id="mbShare" disabled>Send card on WhatsApp</button>':'')+(card.waUrl?'<a class="btn secondary" href="'+esc(card.waUrl)+'" target="_blank" rel="noopener">Text only</a>':'')+'<button type="button" class="btn secondary" id="mbDl">Download PNG</button></div>'+(card.waError?'<p class="muted" style="font-size:13px">'+esc(card.waError)+'</p>':'')+(card.waText?'<p class="muted" style="font-size:13px;margin:0">“Send card on WhatsApp” opens the share menu: choose WhatsApp, then the member. The welcome message is copied too: paste it under the picture if it’s missing.</p>':''):'<div class="notice">'+esc(card.waError||'No member link yet.')+'</div>')+'</div>';
   }
   $('view').innerHTML=h;
   $('mbBack').onclick=closeMemberPage;
@@ -2363,9 +2445,11 @@ function paintMember(){
   $('mbPay').onclick=function(){ startPay(o.code); };
   $('mbEdit').onclick=function(){ o.edit=true; o.err=''; paintMember(); };
   var si=$('mbShowIc'); if(si)si.onclick=function(){ mbShowIc(si); };
-  if(card.link&&$('mbCv')){ mbDrawCard(); window.FDA_qrReady=mbDrawCard; $('mbDl').onclick=function(){ FDACard.download($('mbCv'),m.code); }; }
+  if(card.link&&$('mbCv')){ mbDrawCard(); window.FDA_qrReady=mbDrawCard; $('mbDl').onclick=function(){ FDACard.download($('mbCv'),m.code); };
+    /* R85: straight from the tap (iOS: share() inside the gesture; the PNG was made when the card was drawn) */
+    var sh=$('mbShare'); if(sh)sh.onclick=function(){ FDAShare.shareCard({canvas:$('mbCv'),fileName:m.code+'.png',text:card.waText,waUrl:card.waUrl||'',toast:toast}); }; }
 }
-function mbDrawCard(){ var o=MB.open,cv=$('mbCv'); if(!o||!o.data||!cv)return; FDACard.draw(cv,o.data.card.link,o.data.member.code,o.data.member.name); }
+function mbDrawCard(){ var o=MB.open,cv=$('mbCv'); if(!o||!o.data||!cv)return; FDACard.draw(cv,o.data.card.link,o.data.member.code,o.data.member.name); var sh=$('mbShare'); if(sh)sh.disabled=!FDACard.ready(cv); /* refute R85: no QR-less card */ }
 function mbShowIc(b){ var o=MB.open, code=o.code; if(b)b.disabled=true;
   call('door_revealIc',[code],function(r){ if(!MB.open||MB.open.code!==code)return;
     if(!r||!r.ok){ if(b)b.disabled=false; toast((r&&r.error)||'Could not show the IC',true); return; }

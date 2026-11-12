@@ -13,7 +13,7 @@
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="apple-touch-icon" href="../icons/icon-180.png">
 <link rel="icon" type="image/png" sizes="32x32" href="../icons/icon-32.png">
-<script>window.FDA_API_URL="https://script.google.com/macros/s/AKfycbxDQG-e_sMUr8fYg9NZgUc13STtl1pJ01DpWMI0AWWAHq4i9cCa40Vwm1RhOaPstGzr/exec";window.FDA_BUILD="9b1da21cb4e0";</script>
+<script>window.FDA_API_URL="https://script.google.com/macros/s/AKfycbxDQG-e_sMUr8fYg9NZgUc13STtl1pJ01DpWMI0AWWAHq4i9cCa40Vwm1RhOaPstGzr/exec";window.FDA_BUILD="ce46198e789a";</script>
 <script>
 /* R66 - google.script.run over fetch, for the static pages on fitdancemuar.github.io (inlined into each page by deploy/build-site.js).
    Same chaining API as Apps Script: google.script.run.withSuccessHandler(ok).withFailureHandler(fail).withUserObject(o).fn(...args).
@@ -226,6 +226,7 @@ body{overflow-x:clip}
 .full{position:fixed;inset:0;z-index:60;background:var(--bg);display:flex;align-items:flex-start;justify-content:center;padding:0 16px calc(24px + var(--toast-h, 0px));overflow-y:auto}
 .toast{position:fixed;left:12px;right:12px;bottom:16px;max-width:520px;margin:0 auto;background:var(--green);color:var(--dark);font-weight:700;border-radius:12px;padding:14px 16px;text-align:center;z-index:80}
 .toast.err{background:var(--pink);color:#fff}
+.skel{height:44px;border-radius:12px;margin:8px 0;background:linear-gradient(90deg,var(--surface) 0,var(--surface-2) 50%,var(--surface) 100%);background-size:200% 100%;animation:shim 1.2s linear infinite}@keyframes shim{0%{background-position:200% 0}100%{background-position:-200% 0}}@media (prefers-reduced-motion:reduce){.skel{animation:none}}
 .spin{width:28px;height:28px;border-radius:50%;border:4px solid var(--surface-2);border-top-color:var(--pink);animation:sp 1s linear infinite;margin:24px auto}
 @keyframes sp{to{transform:rotate(360deg)}}
 .inline{display:flex;gap:8px;align-items:center;flex-wrap:wrap;width:100%;margin-top:6px}
@@ -970,6 +971,7 @@ if (typeof module !== 'undefined') module.exports = Engine;
  *     transport: function (fn, args, ok, fail) {...},   // optional; default google.script.run
  *     backend: FDAStore.memoryBackend()    // optional; default IndexedDB, else localStorage, else memory
  *   });
+ *   (o.syncOnVisible: false -> no sync of its own when the page becomes visible again; R87 partners refresh with one bootstrap)
  *   st.ready.then(function (hadLocalData) { render(); st.sync(); });
  *
  *   st.get('members')        -> {code: row}           (also 'attendance' {att_id: row}, 'payments' {pay_id: row},
@@ -1131,6 +1133,12 @@ if (typeof module !== 'undefined') module.exports = Engine;
       });
     }
 
+    // refute R86-R87: the member codes a sync payload brings (pages drop what they keep in memory for them; [] = nothing changed)
+    function touched(p) {
+      var seen = {};
+      if (p) ['members', 'attendance', 'payments', 'coverage', 'carry'].forEach(function (c) { (p[c] || []).forEach(function (r) { if (r && r.code) seen[r.code] = 1; }); });
+      return Object.keys(seen);
+    }
     // ---- merge a door_sync / partners_sync payload
     function merge(p, startedAt) {
       if (!p) return;
@@ -1176,7 +1184,7 @@ if (typeof module !== 'undefined') module.exports = Engine;
         syncing = null;
         if (offline) { offline = false; emitStatus(); }
         merge(p, startedAt);
-        changed({ sync: true, full: !!(p && p.full) });
+        changed({ sync: true, full: !!(p && p.full), codes: touched(p) });
         if (all().length && !sending) flush();
         return p;
       }, function (e) {
@@ -1304,7 +1312,7 @@ if (typeof module !== 'undefined') module.exports = Engine;
       syncedAt: function () { return data.syncedAt; },
       hasData: function () { return !!data.since; },
       sync: sync,
-      applySync: function (p, startedAt) { if (!p || closed) return; merge(p, startedAt || Date.now()); changed({ sync: true, full: !!p.full }); if (all().length && !sending) flush(); },
+      applySync: function (p, startedAt) { if (!p || closed) return; merge(p, startedAt || Date.now()); changed({ sync: true, full: !!p.full, codes: touched(p) }); if (all().length && !sending) flush(); },
       write: write,
       handle: function (endpoint, fn) { handlers[endpoint] = fn; },
       on: function (ev, fn) { (listeners[ev] = listeners[ev] || []).push(fn); },
@@ -1341,7 +1349,8 @@ if (typeof module !== 'undefined') module.exports = Engine;
       startTimer();
       try {
         if (root.addEventListener) root.addEventListener('online', function () { offline = false; emitStatus(); flush(); });
-        if (root.document && root.document.addEventListener) root.document.addEventListener('visibilitychange', function () { if (root.document.visibilityState === 'visible' && session) sync().catch(function () {}); });
+        // R87: syncOnVisible false = the page refreshes itself on return (partners: one bootstrap call carrying the sync)
+        if (o.syncOnVisible !== false && root.document && root.document.addEventListener) root.document.addEventListener('visibilitychange', function () { if (root.document.visibilityState === 'visible' && session) sync().catch(function () {}); });
       } catch (e) {}
       if (outbox.length && session) flush();
       return !!data.since;
@@ -1568,6 +1577,8 @@ if (typeof module !== 'undefined') module.exports = Engine;
 })(typeof window !== 'undefined' ? window : globalThis);
 </script>
 
+<!-- R86: FDAShare.waCard = the one-tap "WhatsApp" button (wa.me chat with the message + the card PNG on the clipboard); shareCard
+     (R85) stays as the smaller "Share card". -->
 <!-- R81: the member QR card (white card, stripe, QR error level H with the logo, code + name, FIT DANCE ACADEMY), shared by the
      partners' member drawer, Peggy's Members tab and (R85) the Join success screen. Needs qrcode-generator (cdnjs) on the page;
      the logo is the header image. R85: FDAShare.shareCard sends the card PNG + text through the phone's share sheet. -->
@@ -1637,7 +1648,7 @@ return { draw: draw, download: download, ready: ready };
 window.FDAShare = (function(){
   var COPIED = 'Message copied — paste it under the picture if it’s missing';
   var HINT = 'Attach the downloaded card';
-  var NOQR = 'The QR code could not load yet. Check your internet and try again, or use “Text only”.';
+  var NOQR = 'The QR code could not load yet. Check your internet and try again, or use “WhatsApp” (message only).';
   var gen = 0;
   /* make the PNG of a painted card now, in the background; kept on the canvas until the next paint */
   function prepare(cv){
@@ -1695,13 +1706,62 @@ window.FDAShare = (function(){
     var p;
     try { p = navigator.share({ files: [file], text: text, title: o.title || 'FIT Dance card' }); } catch (e) { return fallback(); } /* 2. the share sheet */
     return Promise.resolve(p).then(function(){
-      return copying.then(function(c){ say(c ? COPIED : 'Card sent. If the message is missing, tap “Text only”.'); return { mode: 'shared', copied: c }; });
+      return copying.then(function(c){ say(c ? COPIED : 'Card sent. If the message is missing, tap “WhatsApp”.'); return { mode: 'shared', copied: c }; });
     }, function(e){
       if (e && e.name === 'AbortError') return copying.then(function(c){ return { mode: 'cancelled', copied: c }; }); /* closed the sheet: say nothing */
       return fallback();
     });
   }
-  return { shareCard: shareCard, prepare: prepare, copyText: copyText, waText: waText, COPIED: COPIED, HINT: HINT };
+  /* R86: wa.me/<number>?text=<message> (Malaysian numbers: 0… -> 60…, the same rule as Engine.waLink); no number -> wa.me/?text= */
+  function waLink(phone, text){
+    var d = String(phone || '').replace(/\D/g, '');
+    if (!d) return waText(text);
+    if (d.indexOf('60') !== 0) d = d.indexOf('0') === 0 ? '60' + d.slice(1) : '60' + d;
+    return 'https://wa.me/' + d + '?text=' + encodeURIComponent(String(text || ''));
+  }
+  var IMG = 'QR card copied — in WhatsApp, long-press the message box and Paste to add the picture. · QR 卡已复制：在 WhatsApp 长按输入框，选“粘贴”即可加上图片。';
+  var SAVED = 'Attach the saved card — the QR card was saved to your phone; in WhatsApp tap 📎 and pick it. · 请附上已保存的会员卡：在 WhatsApp 点 📎 选择图片。';
+  var NONUM = ' No phone number saved for this member: choose their chat in WhatsApp. · 没有电话号码：请在 WhatsApp 选择对方。';
+  var TEXTONLY = 'The QR card is not ready, so only the message was filled in. · QR 卡还没准备好，只填了文字。';
+  function canImageClipboard(){
+    try { return !!(navigator.clipboard && typeof navigator.clipboard.write === 'function' && typeof ClipboardItem === 'function'); } catch (e) { return false; }
+  }
+  /**
+   * R86 "WhatsApp" - one tap, like before: the member's chat opens with the welcome message filled in (wa.me cannot carry a picture),
+   * and the QR card PNG is on the clipboard so it is one Paste away. Call it straight from the tap handler; everything below runs
+   * synchronously in the tap: (1) navigator.clipboard.write([ClipboardItem({'image/png': blobPromise})]) is STARTED (not awaited)
+   * while the page still has focus and the gesture, (2) the toast, (3) window.open(wa.me…) - the same new tab the old link used.
+   * No image clipboard -> the PNG is downloaded instead ("Attach the saved card"); a refused clipboard write is caught the same
+   * way (download + that toast). No QR on the card yet -> the message alone (never a QR-less picture).
+   * o = {canvas | blob, fileName, waUrl? | phone + text, toast?(msg)} -> Promise {mode: 'clipboard' | 'download' | 'text', url}
+   */
+  function waCard(o){
+    o = o || {};
+    var say = o.toast || function(){}, name = o.fileName || 'card.png';
+    var url = o.waUrl || waLink(o.phone, o.text);
+    var ready = !!o.blob || !!(window.FDACard && window.FDACard.ready(o.canvas));
+    var blob = null, mode = 'text', done = null;
+    if (ready) { try { blob = o.blob || (o.canvas && o.canvas._fdaBlob) || null; } catch (e) { blob = null; } }
+    if (ready && canImageClipboard()) {
+      var blobP = blob ? Promise.resolve(blob) : new Promise(function(res, rej){
+        try { o.canvas.toBlob(function(b){ if (b) res(b); else rej(new Error('no png')); }, 'image/png'); } catch (e) { try { res(blobNow(o.canvas)); } catch (x) { rej(x); } }
+      });
+      try {
+        done = navigator.clipboard.write([new ClipboardItem({ 'image/png': blobP })]).then(function(){ return 'clipboard'; }, function(){
+          return blobP.then(function(b){ save(b, name); say(SAVED); return 'download'; }, function(){ return 'text'; });
+        });
+        mode = 'clipboard';
+      } catch (e) { done = null; mode = 'download'; }
+    } else if (ready) mode = 'download';
+    if (mode === 'download') { try { save(blob || blobNow(o.canvas), name); } catch (e) { mode = 'text'; } }
+    var noNum = /^https:\/\/wa\.me\/\?/.test(url); /* refute R86: no number -> WhatsApp opens on the chat list; say so */
+    say((mode === 'clipboard' ? IMG : mode === 'download' ? SAVED : TEXTONLY) + (noNum ? NONUM : ''));
+    try { window.open(url, '_blank', 'noopener'); } catch (e) {}
+    return (done || Promise.resolve(mode)).then(function(m){ return { mode: m, url: url }; });
+  }
+  /* ruling (refute R86): the small "Text only" link next to WhatsApp - wa.me with the message, nothing copied */
+  function textOnly(url, text, cls){ var u = url || waText(text); return '<a class="' + (cls || 'btn secondary sm') + '" href="' + String(u).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;') + '" target="_blank" rel="noopener">Text only</a>'; }
+  return { textOnly: textOnly, shareCard: shareCard, waCard: waCard, waLink: waLink, prepare: prepare, copyText: copyText, waText: waText, COPIED: COPIED, HINT: HINT, IMG: IMG, SAVED: SAVED };
 })();
 </script>
 
@@ -2013,7 +2073,9 @@ function api(name){
     r[name].apply(r, args);
   });
 }
-function W(name){ return api.apply(null, arguments); }
+/* a write: what this page keeps in memory (drawers, Unpaid, Messages) is dropped when it is sent AND when it is answered
+   (refute R86-R87: never an old "unpaid" / old phone / dead QR link drawn from memory after a write) */
+function W(name){ pageDirty(); return api.apply(null, arguments).then(function(r){ pageDirty(); return r; }); }
 function handleErr(e){
   var m = String(e && e.message || e);
   if (m.indexOf('AUTH') >= 0 || m.indexOf('NO_ACTOR') >= 0) { sessionLost(); return; }
@@ -2101,7 +2163,8 @@ function loginGo(){
   if (!L.name) { L.msg = 'Tap your name first.'; drawLogin(); return; }
   if (!/^\d{4,6}$/.test(L.pin)) { L.msg = 'Type your 4 to 6 digit PIN.'; drawLogin(); return; }
   L.busy = true; drawLogin();
-  api('partners_login', L.name, L.pin).then(function(r){
+  /* R87: the login answer carries the bootstrap (+ sync) too: PIN -> console is ONE call */
+  api('partners_login', L.name, L.pin, { boot: true, since: S.store ? S.store.since() : null }).then(function(r){
     L.busy = false; L.pin = '';
     if (!r || !r.ok) { L.locked = !!(r && r.locked); L.msg = PL.loginMessage(r); drawLogin(); return; }
     L.msg = ''; L.locked = false;
@@ -2110,6 +2173,7 @@ function loginGo(){
     S.session = r.session; S.actor = r.actor; lsSet('fda_psession', r.session); lsSet('fda_pactor', r.actor);
     if (S.store) S.store.setSession(r.session, r.actor); /* same person after an expiry: the kept outbox is sent now */
     $('login').classList.add('hidden');
+    S.bootAnswer = r.boot || null;
     startApp();
   }, function(){ L.busy = false; L.msg = 'Could not reach the system. Check the internet and try again.'; drawLogin(); });
 }
@@ -2119,6 +2183,7 @@ function sessionLost(){
   if (!S.session && !$('login').classList.contains('hidden')) return;
   S.session = ''; lsSet('fda_psession', '');
   cClear(); S.td.data = null; S.msgItems = null; /* refute R85: welcome list (phones, member links) */
+  memForget();
   showLogin('Please log in again.');
 }
 function logout(b, sure){
@@ -2129,10 +2194,21 @@ function logout(b, sure){
   if (S.store) { S.store.clear(); S.store.close(); }
   cClear();
   S.session = ''; S.store = null; S.boot = null; S.actor = ''; lsSet('fda_psession', ''); lsSet('fda_pactor', '');
-  S.td = { classKey: '', data: null, q: '', results: null, res: null, join: null }; S.mem.list = null; S.cal = null; S.money = null; S.dash = null; S.msgItems = null;
+  S.td = { classKey: '', data: null, q: '', results: null, res: null, join: null }; S.mem.list = null; S.cal = null; S.money = null; S.dash = null; S.msgItems = null; memForget();
   showLogin('Logged out.');
 }
 ACT.logout = function(b){ logout(b); };
+
+/* R87: screens seen before draw at once from this page's MEMORY (never the phone's storage: phones, links, settings); gone on logout */
+function typingIn(){ var a = document.activeElement; return !!(a && /^(INPUT|SELECT|TEXTAREA)$/.test(a.tagName) && $main.contains(a)); } /* never redraw over typing */
+function memForget(){ S.memCache = null; S.msgCache = null; S.upCache = null; S.settings = null; S.carry = null; S.bootAnswer = null; }
+/* refute R86-R87: drop the screens kept in memory after a write (codes = only those members' drawers; none = every drawer).
+   PGEN moves on, so an answer that left before the write is shown but never kept. */
+var PGEN = 0;
+function pageDirty(codes){
+  PGEN++; S.upCache = null; S.msgCache = null;
+  if (!codes) S.memCache = null; else if (S.memCache) codes.forEach(function(c){ delete S.memCache[c]; });
+}
 
 /* ===================== header slot: sync chip + who (R61) ===================== */
 function setSlot(){
@@ -2163,27 +2239,42 @@ function startApp(){
   if (!S.session) { showLogin(''); return; }
   $('login').classList.add('hidden');
   if (!S.store) openStore();
+  S.booting = true; /* R87: from here until the bootstrap answer, Today never asks for itself (that answer carries it) */
   var cached = cGet('boot');
   if (cached && !S.boot) { S.boot = cached; S.ym = cached.ym; initMonths(); $('tabs').classList.remove('hidden'); render(); } /* R60(e): draw at once from the last copy */
   setSlot();
-  /* R64.5: ONE call on open: bootstrap carries the sync payload for the local copy (since = its last sync, null = full) */
-  var t0 = Date.now();
-  S.store.ready.then(function(){ return api('partners_bootstrap', S.store.since() || null); }).then(function(b){
+  /* R64.5: ONE call on open: bootstrap carries the sync payload for the local copy (since = its last sync, null = full).
+     R87: right after a PIN login that answer already came with the login (no call at all here). */
+  var t0 = Date.now(), given = S.bootAnswer; S.bootAnswer = null;
+  S.store.ready.then(function(){ return given || api('partners_bootstrap', S.store.since() || null); }).then(gotBoot(t0), function(e){ S.booting = false; handleErr(e); });
+  S.store.ready.then(function(){ if (S.tab === 'today' && $('td_list')) drawTodayList(); });
+}
+/* R87: one answer refreshes everything an open console shows (the local copy, Today, the screen cache) */
+function gotBoot(t0){
+  return function(b){
     if (b && b.sync && S.store) S.store.applySync(b.sync, t0); else syncSoon(); /* an older server without R64.5: sync separately */
     if (b) delete b.sync; /* lives in the store only (never in the screen cache) */
     if (S.tab === 'today' && $('td_list')) drawTodayList();
     var first = !S.boot;
     S.boot = b; S.actor = b.actor; lsSet('fda_pactor', b.actor); S.ym = b.ym; initMonths();
-    if (b.today) { S.td.data = b.today; cSet('today', b.today); }
+    if (b.today && !S.td.classKey) { S.td.data = b.today; cSet('today', b.today); }
     cSet('boot', Object.assign({}, b, { today: null }));
     $('tabs').classList.remove('hidden'); setSlot();
-    if (first || S.tab === 'today') render(); else renderTabs();
-  }, handleErr);
-  S.store.ready.then(function(){ if (S.tab === 'today' && $('td_list')) drawTodayList(); });
+    if (first) render();
+    else if (S.tab === 'today') { if ($('td_list')) { drawTodayHead(); drawTodayList(); } else render(); }
+    else renderTabs();
+    S.booting = false; /* after the redraw: the Today it drew is this answer's */
+  };
+}
+/* R87: back to the app -> ONE call (bootstrap with since = the sync delta + Today), not a sync and a Today call */
+function refreshOpen(){
+  if (!S.store || !S.session || S.booting) return;
+  var t0 = Date.now(); S.booting = true;
+  api('partners_bootstrap', S.store.since() || null).then(gotBoot(t0), function(e){ S.booting = false; handleErr(e); });
 }
 /* R61: the shared local-first store (src/_store.html, FDAStore). Answers to outbox writes arrive through handle(), also after a reload. */
 function openStore(){
-  S.store = FDAStore.open({ kind: 'partners', session: S.session, owner: S.actor, syncFn: 'partners_sync', autoSync: true });
+  S.store = FDAStore.open({ kind: 'partners', session: S.session, owner: S.actor, syncFn: 'partners_sync', autoSync: true, syncOnVisible: false /* R87: refreshOpen() does it */ });
   S.store.on('status', setSlot); S.store.on('auth', sessionLost); S.store.on('change', onStoreChange);
   S.store.handle('partners_manualCheckIn', onCheckInResult);
   S.store.handle('partners_recordPayment', onPayResult);
@@ -2192,7 +2283,11 @@ function openStore(){
   S.store.on('result', function(x){ PRES[x.entry.id] = x.result; });
 }
 function initMonths(){ ['unpaidYm','calYm','moneyYm','dashYm'].forEach(function(k){ if (!S[k]) S[k] = S.ym; }); }
-function onStoreChange(){ setSlot(); if (S.tab === 'today' && S.td.data && $('td_list')) drawTodayList(); }
+function onStoreChange(x){
+  x = x || {};
+  if (x.sync) { if (x.codes && x.codes.length) pageDirty(x.codes); } /* another device's change: those members */
+  else if (!x.cleared) pageDirty(); /* this page wrote (optimistic row / outbox answer) */
+  setSlot(); if (S.tab === 'today' && S.td.data && $('td_list')) drawTodayList(); }
 /* the authoritative answer replaces what this phone showed (server rules win, R61) */
 function onCheckInResult(r, entry){
   r = r || {};
@@ -2327,7 +2422,7 @@ ACT.tab = function(b, v){ S.tab = v; lsSet('fda_ptab', v); render(); window.scro
 VIEWS.today = function(){
   if (!S.td.data) S.td.data = cGet('today');
   if (S.td.data) drawToday(); else loading();
-  refreshToday();
+  if (!S.booting || S.td.classKey) refreshToday(); /* R87: the bootstrap in flight brings Today: no second call */
 };
 function refreshToday(){
   api('partners_today', S.td.classKey || '').then(function(d){
@@ -2692,11 +2787,13 @@ ACT.payReceipt = function(b, v, id){
 /* ===================== UNPAID (R57) ===================== */
 VIEWS.unpaid = function(){
   $main.innerHTML = monthBar('up_m', S.unpaidYm) + '<div id="upbody">' + spin() + '</div>';
+  var had = S.upCache && S.upCache[S.unpaidYm]; if (had) drawUnpaid(had); /* R87: the list seen before (page memory only) */
   loadUnpaid();
 };
 function loadUnpaid(){
   var ym = S.unpaidYm;
-  api('partners_unpaid', ym).then(function(u){ if (S.tab === 'unpaid' && S.unpaidYm === ym) drawUnpaid(u); }, handleErr);
+  var g = PGEN;
+  api('partners_unpaid', ym).then(function(u){ if (g === PGEN) { S.upCache = S.upCache || {}; S.upCache[ym] = u; } if (S.tab === 'unpaid' && S.unpaidYm === ym) drawUnpaid(u); }, handleErr);
 }
 function drawUnpaid(u){
   function row(x, owing){
@@ -2707,7 +2804,7 @@ function drawUnpaid(u){
   $('upbody').innerHTML = '<div class="cols two"><div class="card"><h3>Owing for ' + esc(u.monthLabel) + '</h3><p class="sub">Came to more classes than they paid for.</p>' + ((u.owing || []).map(function(x){ return row(x, true); }).join('') || '<p class="muted">Nobody owes for this month.</p>') + '</div>' +
     '<div class="card"><h3>Not paid yet this month</h3><p class="sub">Paid last month or came in the last 4 weeks, no payment for ' + esc(u.monthLabel) + ' yet.</p>' + ((u.notPaidYet || []).map(function(x){ return row(x, false); }).join('') || '<p class="muted">Nobody.</p>') + '</div></div>';
 }
-CHG.up_m = function(t){ S.unpaidYm = t.value || S.unpaidYm; $('upbody').innerHTML = spin(); loadUnpaid(); };
+CHG.up_m = function(t){ S.unpaidYm = t.value || S.unpaidYm; var had = S.upCache && S.upCache[S.unpaidYm]; if (had) drawUnpaid(had); else $('upbody').innerHTML = spin(); loadUnpaid(); };
 
 /* ===================== events ===================== */
 document.addEventListener('click', function(e){
@@ -2737,7 +2834,7 @@ document.addEventListener('keydown', function(e){
     if (/^\d$/.test(e.key)) ACT.lgKey(null, e.key); else if (e.key === 'Backspace') ACT.lgKey(null, 'del'); else if (e.key === 'Enter') loginGo();
   }
 });
-document.addEventListener('visibilitychange', function(){ if (document.visibilityState === 'visible' && S.store && S.session) { S.store.sync().catch(function(){}); if (S.tab === 'today') refreshToday(); } });
+document.addEventListener('visibilitychange', function(){ if (document.visibilityState === 'visible' && S.store && S.session) refreshOpen(); });
 $('drawer').addEventListener('click', function(e){ if (e.target === $('drawer')) drawerClose(); });
 </script>
 <!-- Partners console: Members (R50 IC masked, R59 pay from the drawer, R62 QR/WhatsApp links from the server). -->
@@ -2781,19 +2878,32 @@ var MFIELDS = [['name','Name'],['sex','Sex'],['phone','Mobile'],['email','Email'
 function memberByCode(code){ var l = S.mem.list || []; for (var i = 0; i < l.length; i++) if (l[i].code === code) return l[i]; return null; }
 ACT.memOpen = function(b, v){ openMember(v); };
 function openMember(code){
-  /* R64.2: the drawer reads ONE member (IC masked); the page never holds everyone's personal details */
-  var light = memberByCode(code);
-  S.open = { code: code, link: '', ic: '', m: null };
-  openDrawer(drawerHead(light ? light.code + ' · ' + light.name : code) + spin());
-  api('partners_member', code).then(function(r){
+  /* R64.2: the drawer reads ONE member (IC masked); the page never holds everyone's personal details.
+     R87: ONE call (details + QR link + welcome WhatsApp together); the local copy draws the head + activity at once. */
+  var light = memberByCode(code) || memberLocal(code), had = S.memCache && S.memCache[code];
+  if (had) { drawMember(had.member, had.card); refreshMember(code); return; } /* R87: opened before in this session: at once */
+  S.open = { code: code, link: '', ic: '', m: null, wa: null };
+  openDrawer(drawerHead(light ? light.code + ' · ' + light.name : code, light && light.status === 'Inactive' ? 'Inactive' : '') +
+    '<div class="skel"></div><div class="skel"></div><div class="card"><h3>Activity</h3><div id="memAct"></div></div><div class="card"><h3>QR card</h3><div id="cardArea">' + spin() + '</div></div>');
+  if (light) { S.open.m = { code: code, name: light.name }; memberActivity(); S.open.m = null; }
+  refreshMember(code);
+}
+/* the drawer's ONE call; kept in this page's memory (never the phone's storage) so a second open is instant; dropped on logout */
+function refreshMember(code){
+  var shown = !!(S.open && S.open.code === code && S.open.m);
+  var g = PGEN; /* refute R86-R87: kept only if no write happened while it was on its way */
+  api('partners_member', code, { card: true }).then(function(r){
+    if (r && r.ok && g === PGEN) { S.memCache = S.memCache || {}; S.memCache[code] = { member: r.member, card: r.card }; }
     if (!S.open || S.open.code !== code) return;
     if (!r || !r.ok) { $('panel').innerHTML = drawerHead(code) + '<p class="muted">' + esc((r && r.error) || 'Member not found.') + '</p>'; return; }
-    drawMember(r.member);
+    var a = document.activeElement;
+    if (shown && (S.open.ic || (a && /^(INPUT|SELECT|TEXTAREA)$/.test(a.tagName) && $('panel').contains(a)))) return; /* never over typing / a shown IC */
+    drawMember(r.member, r.card);
   }, handleErr);
 }
-function drawMember(m){
+function drawMember(m, card){
   var code = m.code;
-  S.open = { code: code, link: '', ic: '', m: m };
+  S.open = { code: code, link: '', ic: '', m: m, wa: null };
   openDrawer(drawerHead(m.code + ' · ' + m.name, esc(planName(m.plan)) + (m.paid ? ' · ' + rm(m.paid) + ' paid' : '') + ' · ' + (m.visitsThisMonth || 0) + ' class' + (m.visitsThisMonth === 1 ? '' : 'es') + ' this month') +
     (m.status === 'Deleted' ? '' : '<div class="bar"><button class="btn" type="button" data-act="memPay">Record payment</button><button class="btn secondary" type="button" data-act="memCheck">Check in now</button></div>') + '<div id="memDel"></div>' +
     '<div class="f2">' + MFIELDS.map(function(f){ return '<div><label for="mf_' + f[0] + '">' + f[1] + '</label><input id="mf_' + f[0] + '" value="' + esc(m[f[0]]) + '"></div>'; }).join('') +
@@ -2810,7 +2920,9 @@ function drawMember(m){
     '<div class="card"><h3>Activity</h3><div id="memAct"></div></div>' +
     '<div class="card"><h3>QR card</h3><div id="cardArea">' + spin() + '</div></div>');
   drawMemDel(); memberActivity();
-  if (m.status !== 'Deleted') loadCard(code); else $('cardArea').innerHTML = '<p class="muted">Deleted: the QR code does not work.</p>';
+  if (m.status === 'Deleted') $('cardArea').innerHTML = '<p class="muted">Deleted: the QR code does not work.</p>';
+  else if (card) gotCard(card);
+  else loadCard(code); /* an older server without R87 */
 }
 ACT.memPay = function(){ var c = S.open.code; openPay(c, 'dr_pay'); };
 ACT.memCheck = function(){ var c = S.open.code; drawerClose(); S.tab = 'today'; render(); setTimeout(function(){ checkIn(c); }, 0); };
@@ -2827,34 +2939,41 @@ ACT.memSave = function(){
   if (S.open.ic) p.id_no = val('mf_id_no'); /* a masked IC is never sent back */
   if (!Engine.validBirthday(p.bday_day, p.bday_month, p.bday_year)) return toast('That birthday is not a real date.', true); /* R82(d) */
   p.trial_used = $('mf_trial_used').checked;
+  if (S.memCache) delete S.memCache[code];
   run(W('partners_saveMember', code, p)).then(function(r){ if (!r) return; S.mem.list = null; if (S.tab === 'members') loadMembers(); syncSoon();
     if (r.unchanged || !r.before || !Object.keys(r.before).length) { toast('Saved'); return; }
     var back = Object.assign({ requestId: rid() }, r.before);
     FDAEdit.undoToast('Saved', function(){ run(W('partners_saveMember', code, back), 'Undone ✓').then(function(x){ if (x) { S.mem.list = null; if (S.tab === 'members') loadMembers(); syncSoon(); if (S.open && S.open.code === code) openMember(code); } }); }); });
 };
+function gotCard(c){
+  if (c.error && !c.link) { $('cardArea').innerHTML = '<div class="warn">' + esc(c.error) + '</div>'; return; }
+  S.open.link = c.link; S.open.wa = { text: c.text || '', url: c.url || '', error: c.error || '' }; showCard();
+}
 function loadCard(code){
-  api('partners_memberLink', code).then(function(r){
+  Promise.all([api('partners_memberLink', code), api('partners_welcomeWa', code)]).then(function(x){
     if (!S.open || S.open.code !== code) return;
-    if (r.error) { $('cardArea').innerHTML = '<div class="warn">' + esc(r.error) + '</div>'; return; }
-    S.open.link = r.link; showCard();
+    var r = x[0] || {}, w = x[1] || {};
+    gotCard({ link: r.link || '', error: r.error || w.error || '', text: w.text || '', url: w.url || '' });
   }, handleErr);
 }
 function showCard(){
-  var m = S.open.m;
+  var m = S.open.m, w = S.open.wa || {};
+  /* R86: "WhatsApp" = one tap: the member's chat with the welcome message + the card picture on the clipboard (Paste);
+     R85's share sheet stays as the smaller "Share card" */
   $('cardArea').innerHTML = '<div class="cardwrap"><canvas id="cardCv" width="900" height="1140" aria-label="Member QR card"></canvas></div>' +
-    '<div class="bar" style="justify-content:center"><span id="waSlot" class="acts" style="justify-content:center"></span><button class="btn secondary sm" type="button" data-act="cardDl">Download PNG</button><button class="btn secondary sm" type="button" data-act="cardSave">Save to Drive</button></div>' +
-    '<p class="ph-hint center">“Send card on WhatsApp” opens the phone’s share menu: choose WhatsApp, then the member. The welcome message is copied too: paste it under the picture if it’s missing. “Text only” sends just the message.</p>' +
+    '<div class="bar" style="justify-content:center"><span id="waSlot" class="acts" style="justify-content:center">' +
+      (w.text ? '<button class="btn good" type="button" data-act="cardWa">WhatsApp</button>' + FDAShare.textOnly(w.url, w.text) + '<button class="btn secondary sm" type="button" data-act="cardShare">Share card</button>' : '') +
+      (w.error ? '<span class="sub">' + esc(w.error) + '</span>' : '') + '</span>' +
+    '<button class="btn secondary sm" type="button" data-act="cardDl">Download PNG</button><button class="btn secondary sm" type="button" data-act="cardSave">Save to Drive</button></div>' +
+    '<p class="ph-hint center">“WhatsApp” opens the member’s chat with the welcome message and copies the QR card: long-press the message box and Paste to add the picture. “Text only” sends just the message. “Share card” opens the phone’s share menu instead.</p>' +
     '<div id="rotArea" style="margin-top:10px"><button class="btn ghost sm" type="button" data-act="rotAsk">Make a new QR code</button></div>';
   drawCard($('cardCv'), S.open.link, m.code, m.name);
-  var code = m.code;
-  api('partners_welcomeWa', code).then(function(w){
-    if (!S.open || S.open.code !== code || !$('waSlot')) return;
-    S.open.wa = w;
-    /* R85: the card + message through the share sheet (needs the text; a member with no phone can still be sent it), and the old text-only link */
-    $('waSlot').innerHTML = (w.text ? '<button class="btn good sm" type="button" data-act="cardShare">Send card on WhatsApp</button>' : '') +
-      (w.url ? waBtn(w.url, 'Text only').replace('btn good sm', 'btn secondary sm') : '') + (w.error ? '<span class="sub">' + esc(w.error) + '</span>' : '');
-  }, handleErr);
 }
+/* R86: straight from the tap - the clipboard write starts before wa.me opens (the PNG was made when the card was drawn) */
+ACT.cardWa = function(){
+  var w = (S.open && S.open.wa) || {}; if (!$('cardCv') || !w.text) return;
+  FDAShare.waCard({ canvas: $('cardCv'), fileName: S.open.code + '.png', text: w.text, waUrl: w.url || '', toast: toast });
+};
 /* R85: straight from the tap (iOS needs share() inside the gesture; the PNG was made when the card was drawn) */
 ACT.cardShare = function(){
   var w = (S.open && S.open.wa) || {}; if (!$('cardCv') || !w.text) return;
@@ -2872,7 +2991,7 @@ ACT.rotAsk = function(){
   $('rotArea').innerHTML = '<div class="warn">The old QR code stops working straight away. The member needs the new card.</div><div class="bar"><button class="btn sm" type="button" data-act="rotGo">Yes, make a new code</button><button class="btn secondary sm" type="button" data-act="rotNo">Cancel</button></div>';
 };
 ACT.rotNo = function(){ showCard(); };
-ACT.rotGo = function(){ run(W('partners_rotateToken', S.open.code), 'New QR code made').then(function(r){ if (r) { S.open.link = r.link; showCard(); } }); };
+ACT.rotGo = function(){ if (S.memCache) delete S.memCache[S.open.code]; run(W('partners_rotateToken', S.open.code), 'New QR code made').then(function(r){ if (r) { if (r.card) gotCard(r.card); else { S.open.link = r.link; showCard(); } } }); };
 /* Join -> straight to the new member's QR card + welcome */
 ACT.joinCard = function(b, v){ S.mem.list = null; drawerClose(); openMember(v); };
 </script>
@@ -3078,7 +3197,11 @@ VIEWS.money = function(){
 };
 function loadMoney(){
   var ym = S.moneyYm;
-  Promise.all([api('partners_moneyList', ym), api('partners_monthClose', ym)]).then(function(x){
+  /* R87: ONE call for the list and the month close (an older server: the two calls) */
+  api('partners_moneyMonth', ym).then(function(r){ return [r.list, r.close]; }, function(e){
+    if (!/Unknown function|UNKNOWN_FN/i.test(String(e && e.message || e))) throw e;
+    return Promise.all([api('partners_moneyList', ym), api('partners_monthClose', ym)]);
+  }).then(function(x){
     if (S.moneyYm !== ym) return;
     S.money = x[0]; S.close = x[1]; S.close.month = S.close.month || ym;
     cSet('money_' + ym, { list: x[0], close: x[1] });
@@ -3312,29 +3435,42 @@ function drawDash(){
 VIEWS.msg = function(){
   var k = S.sub.msg;
   $main.innerHTML = '<div class="seg">' + [['welcome','Welcome (new)'],['monthly','Monthly (all active)'],['unpaid','Unpaid'],['birthday','Birthdays']].map(function(c){ return '<button class="chip" type="button" data-act="subMsg" data-v="' + c[0] + '" aria-pressed="' + (k === c[0]) + '">' + c[1] + '</button>'; }).join('') + '</div><div id="msgbody">' + spin() + '</div>';
+  /* R87: the list seen before (this page's memory only: names, phones, member links - never the phone's storage) draws at once */
+  var had = S.msgCache && S.msgCache[k];
+  if (had) drawMsg(k, had);
+  var g = PGEN;
   api('partners_messages', k).then(function(r){
+    if (g === PGEN) { S.msgCache = S.msgCache || {}; S.msgCache[k] = r; }
     if (S.tab !== 'msg' || S.sub.msg !== k) return;
-    S.msgItems = r.items || [];
-    var wel = k === 'welcome';
-    $('msgbody').innerHTML = r.error ? '<div class="error">' + esc(r.error) + '</div>' : '<p class="sub">' + r.items.length + ' people' + (wel ? ' who joined this month or last month' : '') + '. Each button opens WhatsApp with the message filled in' + (wel ? ' (with their own member link)' : '') + '; you press send.' +
-      (wel ? ' “Send card” opens the share menu with their QR card (choose WhatsApp, then the member) and copies the message: paste it under the picture if it’s missing. “Text only” sends just the message.' : '') + '</p><div class="cols two">' + (r.items.map(function(i, n){
-      var btns = wel ? (i.link ? '<button class="btn good sm" type="button" data-act="msgCard" data-v="' + n + '">Send card on WhatsApp</button>' : '') + (i.url ? waBtn(i.url, 'Text only').replace('btn good sm', 'btn secondary sm') : waBtn('')) : waBtn(i.url);
-      return '<div class="item"><div class="grow"><b>' + esc(i.name) + '</b> <small>' + esc(i.code) + '</small><br><small>' + esc(i.phone || 'no phone') + '</small></div>' + (wel ? '<span class="acts">' + btns + '</span>' : btns) + '</div>'; }).join('') || '<p class="muted">Nobody on this list.</p>') + '</div>';
+    drawMsg(k, r);
   }, handleErr);
 };
+function drawMsg(k, r){
+  S.msgItems = r.items || [];
+  var wel = k === 'welcome';
+  $('msgbody').innerHTML = r.error ? '<div class="error">' + esc(r.error) + '</div>' : '<p class="sub">' + r.items.length + ' people' + (wel ? ' who joined this month or last month' : '') + '. Each button opens WhatsApp with the message filled in' + (wel ? ' (with their own member link)' : '') + '; you press send.' +
+    (wel ? ' “WhatsApp” also copies their QR card: long-press the message box and Paste to add the picture. “Text only” sends just the message. “Share card” opens the share menu instead.' : '') + '</p><div class="cols two">' + (r.items.map(function(i, n){
+    var btns = wel ? (i.link ? '<button class="btn good sm" type="button" data-act="msgWa" data-v="' + n + '">WhatsApp</button>' + FDAShare.textOnly(i.url, i.text) + '<button class="btn secondary sm" type="button" data-act="msgCard" data-v="' + n + '">Share card</button>' : waBtn(i.url)) : waBtn(i.url);
+    return '<div class="item"><div class="grow"><b>' + esc(i.name) + '</b> <small>' + esc(i.code) + '</small><br><small>' + esc(i.phone || 'no phone') + '</small></div>' + (wel ? '<span class="acts">' + btns + '</span>' : btns) + '</div>'; }).join('') || '<p class="muted">Nobody on this list.</p>') + '</div>';
+}
 ACT.subMsg = function(b, v){ S.sub.msg = v; VIEWS.msg(); };
-/* R85: the card is drawn on demand, synchronously, inside the tap (FDACard paints at once; FDAShare makes the PNG from it) */
+/* R85/R86: the card is drawn on demand, synchronously, inside the tap (FDACard paints at once; FDAShare makes the PNG from it) */
+function msgCanvas(i){ var cv = document.createElement('canvas'); cv.width = 900; cv.height = 1140; FDACard.draw(cv, i.link, i.code, i.name); return cv; }
+ACT.msgWa = function(b, v){
+  var i = (S.msgItems || [])[Number(v)]; if (!i || !i.link) return;
+  var cv = msgCanvas(i);
+  FDAShare.waCard({ canvas: cv, fileName: i.code + '.png', text: i.text, waUrl: i.url || '', toast: toast });
+};
 ACT.msgCard = function(b, v){
   var i = (S.msgItems || [])[Number(v)]; if (!i || !i.link) return;
-  var cv = document.createElement('canvas'); cv.width = 900; cv.height = 1140;
-  FDACard.draw(cv, i.link, i.code, i.name);
+  var cv = msgCanvas(i);
   FDAShare.shareCard({ canvas: cv, fileName: i.code + '.png', text: i.text, waUrl: i.url || '', toast: toast });
 };
 
 /* ===================== CARRY-OVER (all three partners approve; actor = session) ===================== */
 VIEWS.carry = function(){
-  loading();
-  api('partners_carryList').then(function(l){ S.carry = l; if (S.tab === 'carry') drawCarry(); }, handleErr);
+  if (S.carry) drawCarry(); else loading(); /* R87: the list seen before draws at once (page memory), then refreshes */
+  api('partners_carryList').then(function(l){ var typing = S.carry && typingIn(); S.carry = l; if (S.tab === 'carry' && !typing) drawCarry(); }, handleErr);
 };
 function drawCarry(){
   var prev = addMonth(S.ym, -1), P = (S.boot || {}).partners || [];
@@ -3366,8 +3502,8 @@ ACT.coDecide = function(b, v, id){ run(W('partners_carryDecide', id, v, rid())).
 
 /* ===================== SETTINGS ===================== */
 VIEWS.settings = function(){
-  loading();
-  api('partners_settings').then(function(s){ S.settings = s; if (S.tab === 'settings') drawSettings(); }, handleErr);
+  if (S.settings) drawSettings(); else loading(); /* R87: page memory, then the server's answer */
+  api('partners_settings').then(function(s){ var typing = S.settings && typingIn(); S.settings = s; if (S.tab === 'settings' && !typing) drawSettings(); }, handleErr);
 };
 function sfield(key, label, type, hint){
   var v = S.settings.values[key]; type = type || 'text';
@@ -3736,7 +3872,7 @@ ACT.memDelNo = function(){ drawMemDel(); };
 ACT.memDelGo = function(){
   var why = val('mdWhy').trim(); if (!why) { $('mdErr').textContent = 'Please type why.'; return; }
   var code = S.open.code;
-  run(W('partners_change', { type: 'member', action: 'delete', id: code, reason: why, requestId: rid() })).then(function(r){
+  if (S.memCache) delete S.memCache[code]; run(W('partners_change', { type: 'member', action: 'delete', id: code, reason: why, requestId: rid() })).then(function(r){
     if (!r) return; if (S.store) S.store.putRows(r);
     drawerClose(); S.mem.list = null; if (S.tab === 'members') loadMembers();
     FDAEdit.undoToast('Member deleted', function(){ run(W('partners_change', { type: 'member', action: 'restore', id: code, requestId: rid() }), 'Undone ✓').then(function(x){ if (x) { if (S.store) S.store.putRows(x); S.mem.list = null; if (S.tab === 'members') loadMembers(); } }); });
@@ -3744,7 +3880,7 @@ ACT.memDelGo = function(){
 };
 ACT.memRestore = function(){
   var code = S.open.code;
-  run(W('partners_change', { type: 'member', action: 'restore', id: code, requestId: rid() }), 'Member restored').then(function(r){ if (r) { if (S.store) S.store.putRows(r); drawerClose(); S.mem.list = null; if (S.tab === 'members') loadMembers(); } });
+  if (S.memCache) delete S.memCache[code]; run(W('partners_change', { type: 'member', action: 'restore', id: code, requestId: rid() }), 'Member restored').then(function(r){ if (r) { if (S.store) S.store.putRows(r); drawerClose(); S.mem.list = null; if (S.tab === 'members') loadMembers(); } });
 };
 function drawMemDel(){
   var m = S.open && S.open.m, el = $('memDel'); if (!el || !m) return;

@@ -13,7 +13,7 @@
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="apple-touch-icon" href="../icons/icon-180.png">
 <link rel="icon" type="image/png" sizes="32x32" href="../icons/icon-32.png">
-<script>window.FDA_API_URL="https://script.google.com/macros/s/AKfycbxDQG-e_sMUr8fYg9NZgUc13STtl1pJ01DpWMI0AWWAHq4i9cCa40Vwm1RhOaPstGzr/exec";window.FDA_BUILD="9b1da21cb4e0";</script>
+<script>window.FDA_API_URL="https://script.google.com/macros/s/AKfycbxDQG-e_sMUr8fYg9NZgUc13STtl1pJ01DpWMI0AWWAHq4i9cCa40Vwm1RhOaPstGzr/exec";window.FDA_BUILD="ce46198e789a";</script>
 <script>
 /* R66 - google.script.run over fetch, for the static pages on fitdancemuar.github.io (inlined into each page by deploy/build-site.js).
    Same chaining API as Apps Script: google.script.run.withSuccessHandler(ok).withFailureHandler(fail).withUserObject(o).fn(...args).
@@ -932,6 +932,7 @@ if (typeof module !== 'undefined') module.exports = Engine;
  *     transport: function (fn, args, ok, fail) {...},   // optional; default google.script.run
  *     backend: FDAStore.memoryBackend()    // optional; default IndexedDB, else localStorage, else memory
  *   });
+ *   (o.syncOnVisible: false -> no sync of its own when the page becomes visible again; R87 partners refresh with one bootstrap)
  *   st.ready.then(function (hadLocalData) { render(); st.sync(); });
  *
  *   st.get('members')        -> {code: row}           (also 'attendance' {att_id: row}, 'payments' {pay_id: row},
@@ -1093,6 +1094,12 @@ if (typeof module !== 'undefined') module.exports = Engine;
       });
     }
 
+    // refute R86-R87: the member codes a sync payload brings (pages drop what they keep in memory for them; [] = nothing changed)
+    function touched(p) {
+      var seen = {};
+      if (p) ['members', 'attendance', 'payments', 'coverage', 'carry'].forEach(function (c) { (p[c] || []).forEach(function (r) { if (r && r.code) seen[r.code] = 1; }); });
+      return Object.keys(seen);
+    }
     // ---- merge a door_sync / partners_sync payload
     function merge(p, startedAt) {
       if (!p) return;
@@ -1138,7 +1145,7 @@ if (typeof module !== 'undefined') module.exports = Engine;
         syncing = null;
         if (offline) { offline = false; emitStatus(); }
         merge(p, startedAt);
-        changed({ sync: true, full: !!(p && p.full) });
+        changed({ sync: true, full: !!(p && p.full), codes: touched(p) });
         if (all().length && !sending) flush();
         return p;
       }, function (e) {
@@ -1266,7 +1273,7 @@ if (typeof module !== 'undefined') module.exports = Engine;
       syncedAt: function () { return data.syncedAt; },
       hasData: function () { return !!data.since; },
       sync: sync,
-      applySync: function (p, startedAt) { if (!p || closed) return; merge(p, startedAt || Date.now()); changed({ sync: true, full: !!p.full }); if (all().length && !sending) flush(); },
+      applySync: function (p, startedAt) { if (!p || closed) return; merge(p, startedAt || Date.now()); changed({ sync: true, full: !!p.full, codes: touched(p) }); if (all().length && !sending) flush(); },
       write: write,
       handle: function (endpoint, fn) { handlers[endpoint] = fn; },
       on: function (ev, fn) { (listeners[ev] = listeners[ev] || []).push(fn); },
@@ -1303,7 +1310,8 @@ if (typeof module !== 'undefined') module.exports = Engine;
       startTimer();
       try {
         if (root.addEventListener) root.addEventListener('online', function () { offline = false; emitStatus(); flush(); });
-        if (root.document && root.document.addEventListener) root.document.addEventListener('visibilitychange', function () { if (root.document.visibilityState === 'visible' && session) sync().catch(function () {}); });
+        // R87: syncOnVisible false = the page refreshes itself on return (partners: one bootstrap call carrying the sync)
+        if (o.syncOnVisible !== false && root.document && root.document.addEventListener) root.document.addEventListener('visibilitychange', function () { if (root.document.visibilityState === 'visible' && session) sync().catch(function () {}); });
       } catch (e) {}
       if (outbox.length && session) flush();
       return !!data.since;
@@ -1621,6 +1629,8 @@ if (typeof module !== 'undefined') module.exports = Engine;
 })(typeof window !== 'undefined' ? window : globalThis);
 </script>
 
+<!-- R86: FDAShare.waCard = the one-tap "WhatsApp" button (wa.me chat with the message + the card PNG on the clipboard); shareCard
+     (R85) stays as the smaller "Share card". -->
 <!-- R81: the member QR card (white card, stripe, QR error level H with the logo, code + name, FIT DANCE ACADEMY), shared by the
      partners' member drawer, Peggy's Members tab and (R85) the Join success screen. Needs qrcode-generator (cdnjs) on the page;
      the logo is the header image. R85: FDAShare.shareCard sends the card PNG + text through the phone's share sheet. -->
@@ -1690,7 +1700,7 @@ return { draw: draw, download: download, ready: ready };
 window.FDAShare = (function(){
   var COPIED = 'Message copied — paste it under the picture if it’s missing';
   var HINT = 'Attach the downloaded card';
-  var NOQR = 'The QR code could not load yet. Check your internet and try again, or use “Text only”.';
+  var NOQR = 'The QR code could not load yet. Check your internet and try again, or use “WhatsApp” (message only).';
   var gen = 0;
   /* make the PNG of a painted card now, in the background; kept on the canvas until the next paint */
   function prepare(cv){
@@ -1748,13 +1758,62 @@ window.FDAShare = (function(){
     var p;
     try { p = navigator.share({ files: [file], text: text, title: o.title || 'FIT Dance card' }); } catch (e) { return fallback(); } /* 2. the share sheet */
     return Promise.resolve(p).then(function(){
-      return copying.then(function(c){ say(c ? COPIED : 'Card sent. If the message is missing, tap “Text only”.'); return { mode: 'shared', copied: c }; });
+      return copying.then(function(c){ say(c ? COPIED : 'Card sent. If the message is missing, tap “WhatsApp”.'); return { mode: 'shared', copied: c }; });
     }, function(e){
       if (e && e.name === 'AbortError') return copying.then(function(c){ return { mode: 'cancelled', copied: c }; }); /* closed the sheet: say nothing */
       return fallback();
     });
   }
-  return { shareCard: shareCard, prepare: prepare, copyText: copyText, waText: waText, COPIED: COPIED, HINT: HINT };
+  /* R86: wa.me/<number>?text=<message> (Malaysian numbers: 0… -> 60…, the same rule as Engine.waLink); no number -> wa.me/?text= */
+  function waLink(phone, text){
+    var d = String(phone || '').replace(/\D/g, '');
+    if (!d) return waText(text);
+    if (d.indexOf('60') !== 0) d = d.indexOf('0') === 0 ? '60' + d.slice(1) : '60' + d;
+    return 'https://wa.me/' + d + '?text=' + encodeURIComponent(String(text || ''));
+  }
+  var IMG = 'QR card copied — in WhatsApp, long-press the message box and Paste to add the picture. · QR 卡已复制：在 WhatsApp 长按输入框，选“粘贴”即可加上图片。';
+  var SAVED = 'Attach the saved card — the QR card was saved to your phone; in WhatsApp tap 📎 and pick it. · 请附上已保存的会员卡：在 WhatsApp 点 📎 选择图片。';
+  var NONUM = ' No phone number saved for this member: choose their chat in WhatsApp. · 没有电话号码：请在 WhatsApp 选择对方。';
+  var TEXTONLY = 'The QR card is not ready, so only the message was filled in. · QR 卡还没准备好，只填了文字。';
+  function canImageClipboard(){
+    try { return !!(navigator.clipboard && typeof navigator.clipboard.write === 'function' && typeof ClipboardItem === 'function'); } catch (e) { return false; }
+  }
+  /**
+   * R86 "WhatsApp" - one tap, like before: the member's chat opens with the welcome message filled in (wa.me cannot carry a picture),
+   * and the QR card PNG is on the clipboard so it is one Paste away. Call it straight from the tap handler; everything below runs
+   * synchronously in the tap: (1) navigator.clipboard.write([ClipboardItem({'image/png': blobPromise})]) is STARTED (not awaited)
+   * while the page still has focus and the gesture, (2) the toast, (3) window.open(wa.me…) - the same new tab the old link used.
+   * No image clipboard -> the PNG is downloaded instead ("Attach the saved card"); a refused clipboard write is caught the same
+   * way (download + that toast). No QR on the card yet -> the message alone (never a QR-less picture).
+   * o = {canvas | blob, fileName, waUrl? | phone + text, toast?(msg)} -> Promise {mode: 'clipboard' | 'download' | 'text', url}
+   */
+  function waCard(o){
+    o = o || {};
+    var say = o.toast || function(){}, name = o.fileName || 'card.png';
+    var url = o.waUrl || waLink(o.phone, o.text);
+    var ready = !!o.blob || !!(window.FDACard && window.FDACard.ready(o.canvas));
+    var blob = null, mode = 'text', done = null;
+    if (ready) { try { blob = o.blob || (o.canvas && o.canvas._fdaBlob) || null; } catch (e) { blob = null; } }
+    if (ready && canImageClipboard()) {
+      var blobP = blob ? Promise.resolve(blob) : new Promise(function(res, rej){
+        try { o.canvas.toBlob(function(b){ if (b) res(b); else rej(new Error('no png')); }, 'image/png'); } catch (e) { try { res(blobNow(o.canvas)); } catch (x) { rej(x); } }
+      });
+      try {
+        done = navigator.clipboard.write([new ClipboardItem({ 'image/png': blobP })]).then(function(){ return 'clipboard'; }, function(){
+          return blobP.then(function(b){ save(b, name); say(SAVED); return 'download'; }, function(){ return 'text'; });
+        });
+        mode = 'clipboard';
+      } catch (e) { done = null; mode = 'download'; }
+    } else if (ready) mode = 'download';
+    if (mode === 'download') { try { save(blob || blobNow(o.canvas), name); } catch (e) { mode = 'text'; } }
+    var noNum = /^https:\/\/wa\.me\/\?/.test(url); /* refute R86: no number -> WhatsApp opens on the chat list; say so */
+    say((mode === 'clipboard' ? IMG : mode === 'download' ? SAVED : TEXTONLY) + (noNum ? NONUM : ''));
+    try { window.open(url, '_blank', 'noopener'); } catch (e) {}
+    return (done || Promise.resolve(mode)).then(function(m){ return { mode: m, url: url }; });
+  }
+  /* ruling (refute R86): the small "Text only" link next to WhatsApp - wa.me with the message, nothing copied */
+  function textOnly(url, text, cls){ var u = url || waText(text); return '<a class="' + (cls || 'btn secondary sm') + '" href="' + String(u).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;') + '" target="_blank" rel="noopener">Text only</a>'; }
+  return { textOnly: textOnly, shareCard: shareCard, waCard: waCard, waLink: waLink, prepare: prepare, copyText: copyText, waText: waText, COPIED: COPIED, HINT: HINT, IMG: IMG, SAVED: SAVED };
 })();
 </script>
 
@@ -1882,12 +1941,12 @@ function drawDots(){var h='';for(var i=0;i<pin.length;i++)h+='<i></i>';$('dots')
 function showPin(msg){ $('console').classList.add('hidden'); $('pinScreen').classList.remove('hidden'); $('hdr-slot').innerHTML=''; $('offbar').classList.add('hidden');
   $('pinMsg').textContent=msg||'Enter the PIN'; pin=''; drawDots(); }
 function submitPin(){
-  if(!pin||busy)return; busy=true; $('pinMsg').textContent='Checking…';
+  if(!pin||busy)return; busy=true; $('pinMsg').textContent='Checking…'; var t0=Date.now();
   google.script.run.withSuccessHandler(function(r){
     busy=false;
-    if(r&&r.ok){session=r.session;me=r.name||'Peggy';lsSet(KEY,session);lsSet(NAME_KEY,me);pin='';drawDots();enter();}
+    if(r&&r.ok){session=r.session;me=r.name||'Peggy';lsSet(KEY,session);lsSet(NAME_KEY,me);pin='';drawDots();LOGIN_SYNC=r.sync||null;LOGIN_T0=t0;enter();}
     else{pin='';drawDots();$('pinMsg').textContent=(r&&r.error)||'Wrong PIN';}
-  }).withFailureHandler(function(){busy=false;pin='';drawDots();$('pinMsg').textContent='No signal. Check the internet and try again.';}).door_login(pin);
+  }).withFailureHandler(function(){busy=false;pin='';drawDots();$('pinMsg').textContent='No signal. Check the internet and try again.';}).door_login(pin,{sync:true,since:st?st.since():null}); /* R87: the login answer carries the sync: PIN -> Today in ONE call */
 }
 function authLost(){ session=''; lsSet(KEY,null); MB.open=null; upForget(); showPin('Please enter the PIN again.'); }
 function logout(){
@@ -1898,21 +1957,24 @@ function logout(){
 }
 
 /* ================================================================ console + store */
+var LOGIN_SYNC=null, LOGIN_T0=0;
+/* R87: the sync that came with the login answer (no second call), else a sync now */
+function firstSync(){ var p=LOGIN_SYNC; LOGIN_SYNC=null; if(p){ st.applySync(p,LOGIN_T0); return Promise.resolve(p); } return st.sync(); }
 function enter(){
   $('pinScreen').classList.add('hidden'); $('console').classList.remove('hidden');
   $('hdr-slot').innerHTML='<button type="button" class="sync" id="syncChip" aria-label="Sync status"><i></i><span>Saved</span></button>';
   $('syncChip').onclick=openSheet;
   drawTabs();
-  if(st){ st.setSession(session,me); st.sync().catch(function(){}); paint(); return; }
+  if(st){ st.setSession(session,me); firstSync().catch(function(){}); paint(); return; }
   st=FDAStore.open({kind:'staff',session:session,owner:me,syncFn:'door_sync',autoSync:true});
   st.on('status',showStatus);
-  st.on('change',function(x){ if(x&&x.sync&&!selClass)selClass=defaultClass(); refresh(x); });
+  st.on('change',function(x){ mbDirty(x); if(x&&x.sync&&!selClass)selClass=defaultClass(); refresh(x); });
   st.on('auth',authLost);
   registerHandlers();
   st.ready.then(function(had){
     if(st.meta('unpaid')||st.meta('unpaidAt')){ st.meta('unpaid',null); st.meta('unpaidAt',null); } /* R82(a): wipe a list saved by an older version */
     if(had){ selClass=selClass||defaultClass(); paint(); FDA_PERF.firstLocalPaint=Math.round(((window.performance&&performance.now)?performance.now():0)-T0); }
-    st.sync().then(function(){ if(!had){ selClass=defaultClass(); paint(); } },function(){
+    firstSync().then(function(){ if(!had){ selClass=defaultClass(); paint(); } },function(){
       if(had||!session)return;
       $('view').innerHTML='<div class="error">No signal, and nothing saved on this phone yet. Try again when the signal is back.</div><button class="btn block" id="retrySync">Try again</button>';
       $('retrySync').onclick=function(){st.sync().then(paint,function(){toast('Still no signal.',true);});};
@@ -2270,7 +2332,7 @@ function viewSaved(){
    open, never written to the phone's storage; dropped on logout / lost session. */
 var UP={list:null,at:0};
 function upSave(r){ UP.list=r; UP.at=Date.now(); }
-function upForget(){ UP.list=null; UP.at=0; }
+function upForget(){ UP.list=null; UP.at=0; MBC={}; } /* R87: member details kept in memory go with it (logout / lost session) */
 function viewUnpaid(){
   var u=UP.list;
   paintUnpaid(u,!u);
@@ -2403,11 +2465,20 @@ function paintMembers(){
   o.innerHTML=h;
 }
 /* one member's details from the server (needs signal; never saved on this phone) */
+/* R87: a member opened before in this session draws at once from this page's memory (never the phone's storage), then refreshes */
+var MBC={}, MBGEN=0;
+/* refute R86-R87: a write from this phone drops every member kept in memory; another device's change (sync) only those members.
+   MBGEN moves on, so an answer that left before the write is shown but never kept. */
+function mbDirty(x){ x=x||{}; if(x.cleared)return; if(x.sync){ if(!(x.codes&&x.codes.length))return; MBGEN++; x.codes.forEach(function(c){ delete MBC[c]; }); return; } MBGEN++; MBC={}; }
 function openMemberPage(code){
-  MB.open={code:code,data:null,ic:'',edit:false,err:'',loading:true};
+  var had=MBC[code]||null;
+  MB.open={code:code,data:had,ic:'',edit:false,err:'',loading:!had};
   paintMember(); window.scrollTo(0,0);
+  var g=MBGEN;
   call('door_member',[code],function(r){
+    if(r&&r.ok&&g===MBGEN)MBC[code]=r;
     if(!MB.open||MB.open.code!==code)return;
+    if(had&&(MB.open.edit||MB.open.ic))return; /* never redraw over an open form / a shown IC */
     MB.open.loading=false;
     if(!r||!r.ok){MB.open.err=(r&&r.error)||'Member not found.';}
     else{ MB.open.data=r; MB.open.err=''; if(MB.open.ic&&r.member)r.member.id_no=MB.open.ic; }
@@ -2437,7 +2508,7 @@ function paintMember(){
       '<dt>Birthday</dt><dd>'+mbVal(mbDob(m))+'</dd><dt>Mobile</dt><dd>'+mbVal(m.phone)+'</dd><dt>Email</dt><dd>'+mbVal(m.email)+'</dd><dt>Address</dt><dd>'+mbVal(m.address)+'</dd>'+
       '<dt>Heard from</dt><dd>'+mbVal(m.referral)+'</dd><dt>Emergency</dt><dd>'+mbVal([m.emergency_name,m.emergency_phone].filter(function(x){return String(x||'').trim();}).join(' · '))+'</dd>'+
       '<dt>Physical limits</dt><dd>'+mbVal(m.physical_limits)+'</dd><dt>Allergies</dt><dd>'+mbVal(m.allergies)+'</dd><dt>Other illness</dt><dd>'+mbVal(m.other_illness)+'</dd><dt>Notes</dt><dd>'+mbVal(m.notes)+'</dd></dl></div>';
-    h+='<div class="card"><span class="label">QR card</span>'+(card.link?'<div class="mcard" style="margin-top:8px"><canvas id="mbCv" width="900" height="1140" aria-label="Member QR card"></canvas></div><div class="actions" style="margin-top:10px">'+(card.waText?'<button type="button" class="btn good" id="mbShare" disabled>Send card on WhatsApp</button>':'')+(card.waUrl?'<a class="btn secondary" href="'+esc(card.waUrl)+'" target="_blank" rel="noopener">Text only</a>':'')+'<button type="button" class="btn secondary" id="mbDl">Download PNG</button></div>'+(card.waError?'<p class="muted" style="font-size:13px">'+esc(card.waError)+'</p>':'')+(card.waText?'<p class="muted" style="font-size:13px;margin:0">“Send card on WhatsApp” opens the share menu: choose WhatsApp, then the member. The welcome message is copied too: paste it under the picture if it’s missing.</p>':''):'<div class="notice">'+esc(card.waError||'No member link yet.')+'</div>')+'</div>';
+    h+='<div class="card"><span class="label">QR card</span>'+(card.link?'<div class="mcard" style="margin-top:8px"><canvas id="mbCv" width="900" height="1140" aria-label="Member QR card"></canvas></div><div class="actions" style="margin-top:10px">'+(card.waText?'<button type="button" class="btn good" id="mbWa">WhatsApp</button>'+FDAShare.textOnly(card.waUrl,card.waText)+'<button type="button" class="btn secondary sm" id="mbShare" disabled>Share card</button>':'')+'<button type="button" class="btn secondary sm" id="mbDl">Download PNG</button></div>'+(card.waError?'<p class="muted" style="font-size:13px">'+esc(card.waError)+'</p>':'')+(card.waText?'<p class="muted" style="font-size:13px;margin:0">“WhatsApp” opens the member’s chat with the welcome message and copies the QR card: long-press the message box and Paste to add the picture. “Share card” opens the share menu instead.</p>':''):'<div class="notice">'+esc(card.waError||'No member link yet.')+'</div>')+'</div>';
   }
   $('view').innerHTML=h;
   $('mbBack').onclick=closeMemberPage;
@@ -2447,7 +2518,9 @@ function paintMember(){
   var si=$('mbShowIc'); if(si)si.onclick=function(){ mbShowIc(si); };
   if(card.link&&$('mbCv')){ mbDrawCard(); window.FDA_qrReady=mbDrawCard; $('mbDl').onclick=function(){ FDACard.download($('mbCv'),m.code); };
     /* R85: straight from the tap (iOS: share() inside the gesture; the PNG was made when the card was drawn) */
-    var sh=$('mbShare'); if(sh)sh.onclick=function(){ FDAShare.shareCard({canvas:$('mbCv'),fileName:m.code+'.png',text:card.waText,waUrl:card.waUrl||'',toast:toast}); }; }
+    var sh=$('mbShare'); if(sh)sh.onclick=function(){ FDAShare.shareCard({canvas:$('mbCv'),fileName:m.code+'.png',text:card.waText,waUrl:card.waUrl||'',toast:toast}); };
+    /* R86: one tap - the card PNG goes to the clipboard (started in the tap) and wa.me opens the member's chat with the message */
+    var wb=$('mbWa'); if(wb)wb.onclick=function(){ FDAShare.waCard({canvas:$('mbCv'),fileName:m.code+'.png',text:card.waText,waUrl:card.waUrl||'',toast:toast}); }; }
 }
 function mbDrawCard(){ var o=MB.open,cv=$('mbCv'); if(!o||!o.data||!cv)return; FDACard.draw(cv,o.data.card.link,o.data.member.code,o.data.member.name); var sh=$('mbShare'); if(sh)sh.disabled=!FDACard.ready(cv); /* refute R85: no QR-less card */ }
 function mbShowIc(b){ var o=MB.open, code=o.code; if(b)b.disabled=true;
@@ -2487,7 +2560,7 @@ function mbFormWire(m,o){
     if(joinOffline()){ o.err='No signal. Saving a member’s details needs the internet (they are not kept on this phone).'; paintMember(); return; }
     o.saving=true; o.err='';
     var lm=member(o.code), row=lm?Object.assign({},lm,patch.name?{name:patch.name}:{},patch.status?{status:patch.status}:{}):null;
-    change({type:'member',action:'edit',id:o.code,patch:patch},{what:'member',patches:row?[{coll:'members',id:o.code,row:{code:row.code,name:row.name,phoneMasked:row.phoneMasked,status:row.status,bday_month:patch.bday_month!==undefined?patch.bday_month:row.bday_month,trial_used:row.trial_used,healthNote:row.healthNote,updated_at:row.updated_at}}]:null});
+    mbDirty(); change({type:'member',action:'edit',id:o.code,patch:patch},{what:'member',patches:row?[{coll:'members',id:o.code,row:{code:row.code,name:row.name,phoneMasked:row.phoneMasked,status:row.status,bday_month:patch.bday_month!==undefined?patch.bday_month:row.bday_month,trial_used:row.trial_used,healthNote:row.healthNote,updated_at:row.updated_at}}]:null});
     paintMember();
   };
 }

@@ -13,7 +13,7 @@
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="apple-touch-icon" href="icons/icon-180.png">
 <link rel="icon" type="image/png" sizes="32x32" href="icons/icon-32.png">
-<script>window.FDA_API_URL="https://script.google.com/macros/s/AKfycbxDQG-e_sMUr8fYg9NZgUc13STtl1pJ01DpWMI0AWWAHq4i9cCa40Vwm1RhOaPstGzr/exec";window.FDA_BUILD="9b1da21cb4e0";</script>
+<script>window.FDA_API_URL="https://script.google.com/macros/s/AKfycbxDQG-e_sMUr8fYg9NZgUc13STtl1pJ01DpWMI0AWWAHq4i9cCa40Vwm1RhOaPstGzr/exec";window.FDA_BUILD="ce46198e789a";</script>
 <script>
 /* R66 - google.script.run over fetch, for the static pages on fitdancemuar.github.io (inlined into each page by deploy/build-site.js).
    Same chaining API as Apps Script: google.script.run.withSuccessHandler(ok).withFailureHandler(fail).withUserObject(o).fn(...args).
@@ -278,8 +278,23 @@ function actionHtml(c){
 }
 function busyHtml(by){ return '<div class="status already" role="status"><div class="spin"></div><div class="word" style="font-size:44px">CHECKING IN…</div><div class="zh">正在签到</div>'+(by?'<div class="by">Scanned by '+esc(by)+'</div>':'')+'</div>'; }
 
+/* R87(b): the member's OWN phone keeps its last card (localStorage, this token only) and draws it at once on the next open; the
+   server's answer replaces it. Never on a staff / partner phone (another member's card), dropped when the QR is no longer valid. */
+var CARD_KEY='fda_card';
+function cacheGet(){ if(STAFF) return null; try{ var c=JSON.parse(lsGet(CARD_KEY)||'null'); return c && c.token===TOKEN && c.card && c.card.kind==='CARD' ? c.card : null; }catch(e){ return null; } }
+function cachePut(c){ if(STAFF) return; try{ var k={}; Object.keys(c).forEach(function(x){ if(['window','checkedIn','autoCheckIn','staffName'].indexOf(x)<0) k[x]=c[x]; }); localStorage.setItem(CARD_KEY, JSON.stringify({token:TOKEN, at:Date.now(), card:k})); }catch(e){} }
+function cacheDrop(){ try{ localStorage.removeItem(CARD_KEY); }catch(e){} }
+function showCached(c){
+  CARD=c;
+  $app.setAttribute('aria-busy','true');
+  $app.innerHTML='<div class="hello"><span class="label">Hi 你好</span><h1>'+esc(c.firstName||c.name)+'</h1></div>'+
+    '<div id="act"><div class="status already" role="status"><div class="spin"></div><div class="sub">Updating… · 更新中</div></div></div><div id="bday">'+bdayHtml(c.birthday)+'</div>'+cardHtml(c);
+  drawQr(c.cardLink || c.qrLink);
+}
 function showCard(c){
-  if(!c || c.kind!=='CARD'){ problem(c); return; }
+  if(c && c.kind==='UNKNOWN') cacheDrop();
+  if(!c || c.kind!=='CARD'){ if(CARD && CARD._cached && (!c || c.kind==='ERROR')) return cachedOffline(); problem(c); return; }
+  cachePut(c);
   CARD=c;
   $app.setAttribute('aria-busy','false');
   $app.innerHTML='<div class="hello"><span class="label">Hi 你好</span><h1>'+esc(c.firstName||c.name)+'</h1></div>'+
@@ -348,6 +363,8 @@ function drawQr(link){
   }catch(e){ cv.outerHTML='<div style="color:#000;word-break:break-all;padding:8px">'+esc(link)+'</div>'; }
 }
 
+/* no signal: keep the saved card on screen (the QR still works at the door), with a note instead of the check-in button */
+function cachedOffline(){ var a=document.getElementById('act'); if(a) a.innerHTML='<div class="error">'+esc(NET_ERR)+'<br><span class="muted">网络有问题 · showing your saved card</span></div><button type="button" class="btn block" id="again">Try again 再试一次</button>'; var b=document.getElementById('again'); if(b) b.onclick=load; $app.setAttribute('aria-busy','false'); }
 function load(){
   if(!TOKEN){ /* R80: a prominent "Join now" above the "open your personal link" note */
     $app.setAttribute('aria-busy','false');
@@ -357,9 +374,11 @@ function load(){
       '<p>Already a member? Please scan your personal QR code to open your card.</p><p class="muted">请扫描您的专属二维码</p></div>';
     return;
   }
+  var saved=cacheGet();
+  if(saved){ saved._cached=true; showCached(saved); }
   google.script.run
     .withSuccessHandler(showCard)
-    .withFailureHandler(function(){ problem({kind:'ERROR',message:NET_ERR}); })
+    .withFailureHandler(function(){ if(CARD && CARD._cached) cachedOffline(); else problem({kind:'ERROR',message:NET_ERR}); })
     .door_memberCard(TOKEN, STAFF);
 }
 if (typeof qrcode === 'function') QR_STATE = 'ready';

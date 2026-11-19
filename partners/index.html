@@ -13,7 +13,7 @@
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="apple-touch-icon" href="../icons/icon-180.png">
 <link rel="icon" type="image/png" sizes="32x32" href="../icons/icon-32.png">
-<script>window.FDA_API_URL="https://script.google.com/macros/s/AKfycbxDQG-e_sMUr8fYg9NZgUc13STtl1pJ01DpWMI0AWWAHq4i9cCa40Vwm1RhOaPstGzr/exec";window.FDA_BUILD="ce46198e789a";</script>
+<script>window.FDA_API_URL="https://script.google.com/macros/s/AKfycbxDQG-e_sMUr8fYg9NZgUc13STtl1pJ01DpWMI0AWWAHq4i9cCa40Vwm1RhOaPstGzr/exec";window.FDA_BUILD="5d06e9f004fd";</script>
 <script>
 /* R66 - google.script.run over fetch, for the static pages on fitdancemuar.github.io (inlined into each page by deploy/build-site.js).
    Same chaining API as Apps Script: google.script.run.withSuccessHandler(ok).withFailureHandler(fail).withUserObject(o).fn(...args).
@@ -362,7 +362,13 @@ var Engine = (function () {
   function priceSen(plan, bday, settings) {
     var c = cfg(settings);
     var base = plan === 'UNL' ? c.unl : plan === 'STD' ? c.std : c.per;
-    return bday ? Math.round(base * (1 - c.disc)) : base;
+    // R88: the birthday discount is for Standard and Unlimited only; Per class (PER/EXTRA/DROPIN) is always full price
+    return bday && (plan === 'STD' || plan === 'UNL') ? Math.round(base * (1 - c.disc)) : base;
+  }
+  /** R88: does a payment of this kind carry the birthday discount (Standard/Unlimited and their top-ups, in the birthday month)? */
+  function birthdayApplies(kind, member, yyyymm) {
+    var k = String(kind || '');
+    return (k === 'STD' || k === 'UNL' || k === 'TOPUP_STD' || k === 'TOPUP_UNL') && isBirthdayMonth(member, yyyymm);
   }
 
   // ---------- Kuala Lumpur time ----------
@@ -429,12 +435,18 @@ var Engine = (function () {
     var c = cfg(settings);
     var bday = isBirthdayMonth(member, yyyymm);
     var per = priceSen('PER', bday, settings), std = priceSen('STD', bday, settings), unl = priceSen('UNL', bday, settings);
+    // R88: before R88 a birthday single class cost 10% less (RM13.50). Past payments are not changed: a birthday month that holds
+    // such a single keeps being judged with the old per-class divisor, so check-ins it paid for stay paid (server and browser alike).
+    var oldPer = Math.round(per * (1 - c.disc)), legacy = false;
     var paid = 0;
     (payments || []).forEach(function (p) {
       if (isTrue(p.void)) return;
       if (member && p.code && member.code && p.code !== member.code) return;
-      paid += toSen(p.amount) + Math.max(0, toSen(p.rebate)); // R58: a rebated plan still counts at its full value
+      var v = toSen(p.amount) + Math.max(0, toSen(p.rebate)); // R58: a rebated plan still counts at its full value
+      if (bday && oldPer > 0 && oldPer < per && (p.kind === 'PER' || p.kind === 'EXTRA') && v === oldPer) legacy = true;
+      paid += v;
     });
+    if (legacy) per = oldPer;
     var carry = Math.max(0, Number(carryApprovedClasses) || 0);
     var covered, plan;
     if (paid >= unl && unl > 0) { covered = Infinity; plan = 'UNL'; }
@@ -941,7 +953,7 @@ var Engine = (function () {
     isTrue: isTrue, toSen: toSen, fromSen: fromSen,
     klParts: klParts, klDate: klDate, dateStr: dateStr, isoKL: isoKL, ymOf: ymOf, fmtDate: fmtDate, fmtTime: fmtTime, fmtRM: fmtRM, parseTs: parseTs,
     priceFor: function (plan, isBirthday, settings) { return fromSen(priceSen(plan, isBirthday, settings)); },
-    isBirthdayMonth: isBirthdayMonth,
+    isBirthdayMonth: isBirthdayMonth, birthdayApplies: birthdayApplies,
     coverage: coverage,
     classAt: classAt, nextClass: nextClass, classDates: classDates, sessions: sessions, sessionsAround: sessionsAround, staffClass: staffClass,
     planMonth: planMonth, shownResult: shownResult, monthRange: monthRange, sessionStartMs: startMs, sessionEndMs: endMs, weekStart: weekStart, weekIndex: weekIndex, addDays: addDays, classStart: classStart,
@@ -2495,7 +2507,7 @@ function statusHtml(){
   var h = '<div class="status ' + cls + '"><div class="who2">' + esc(r.name || '') + (r.code ? ' · ' + esc(r.code) : '') + '</div><div class="word">' + word + '</div><div class="sub">' + esc(r.message || '') + '</div>' + (r.classLabel ? '<div class="sub" style="font-size:14px">' + esc(r.classLabel) + '</div>' : '') +
     (r.provisional ? '<div class="sub" id="td_ptext" style="font-size:13px;opacity:.8">' + pendingText(r.rid) + '</div>' : '') + '</div>';
   if (r.changed) h += '<div class="warn">' + esc(r.changed) + '</div>';
-  if (r.birthday) h += '<div class="banner">Birthday month: 10% off</div>';
+  if (r.birthday) h += '<div class="banner">Birthday month: 10% off Standard &amp; Unlimited</div>';
   if (r.health) h += '<div class="warn">Has a health note. Check Members for details.</div>';
   if (r.kind === 'UNPAID') h += '<p><button class="btn block" type="button" data-act="tdPay" data-v="' + esc(r.code) + '">Record payment</button></p>';
   return h + '<div id="td_pay">' + payHtml() + '</div>';
@@ -2664,7 +2676,7 @@ function payHtml(){
   if (P.mode === 'adv') return '<div class="card pay"><h3>' + esc(c.name) + ' <small class="muted">' + esc(c.code) + '</small></h3>' + modeSeg + paidOn + payAdvHtml() + '</div>';
   return '<div class="card pay"><h3>' + esc(c.name) + ' <small class="muted">' + esc(c.code) + '</small></h3>' + modeSeg + paidOn + '<span class="label" style="display:block;margin-top:12px">For month</span>' +
     '<div class="seg" role="group" aria-label="Month">' + months.map(function(m){ return '<button class="chip" type="button" data-act="payMonth" data-v="' + m + '" aria-pressed="' + (P.month === m) + '">' + esc(monthLabel(m)) + '</button>'; }).join('') + '</div>' +
-    '<p class="sub">Paid so far in ' + esc(c.monthLabel) + ': ' + esc(c.paidLabel) + (c.birthday ? ' · <b style="color:var(--yellow)">birthday prices</b>' : '') + (c.local ? ' · checking…' : '') + '</p>' +
+    '<p class="sub">Paid so far in ' + esc(c.monthLabel) + ': ' + esc(c.paidLabel) + (c.birthday ? ' · <b style="color:var(--yellow)">birthday: 10% off Standard &amp; Unlimited</b>' : '') + (c.local ? ' · checking…' : '') + '</p>' +
     (c.options.length ? c.options.map(function(x, i){ return '<button class="optcard' + (P.sel === i ? ' on' : '') + '" type="button" data-act="payOpt" data-v="' + i + '"><span>' + esc(x.label) + '</span><b>' + esc(x.amountLabel) + '</b></button>'; }).join('') +
       '<span class="label" style="display:block;margin-top:12px">Method</span><div class="seg" role="group" aria-label="Method">' + (B.methods || ['Cash','TNG','Bank transfer']).map(function(m){ return '<button class="chip" type="button" data-act="payMethod" data-v="' + esc(m) + '" aria-pressed="' + (P.method === m) + '">' + esc(m) + '</button>'; }).join('') + '</div>' +
       '<div class="f2"><div><label for="tp_by">Received by</label><select id="tp_by">' + opts(B.holders || [S.actor], P.holder) + '</select></div>' +

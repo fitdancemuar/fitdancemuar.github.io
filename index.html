@@ -13,7 +13,7 @@
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="apple-touch-icon" href="icons/icon-180.png">
 <link rel="icon" type="image/png" sizes="32x32" href="icons/icon-32.png">
-<script>window.FDA_API_URL="https://script.google.com/macros/s/AKfycbxDQG-e_sMUr8fYg9NZgUc13STtl1pJ01DpWMI0AWWAHq4i9cCa40Vwm1RhOaPstGzr/exec";window.FDA_BUILD="ce46198e789a";</script>
+<script>window.FDA_API_URL="https://script.google.com/macros/s/AKfycbxDQG-e_sMUr8fYg9NZgUc13STtl1pJ01DpWMI0AWWAHq4i9cCa40Vwm1RhOaPstGzr/exec";window.FDA_BUILD="5d06e9f004fd";</script>
 <script>
 /* R66 - google.script.run over fetch, for the static pages on fitdancemuar.github.io (inlined into each page by deploy/build-site.js).
    Same chaining API as Apps Script: google.script.run.withSuccessHandler(ok).withFailureHandler(fail).withUserObject(o).fn(...args).
@@ -268,7 +268,7 @@ function cardHtml(c){
   h+='<p class="center muted" style="margin:20px 0 0;font-size:14px">New here? <a href="'+JOIN_URL+'">Join FIT Dance</a> · 新朋友？加入我们</p>'; /* R80 */
   return h;
 }
-function bdayHtml(on){ return on?'<div class="banner">🎂 Happy birthday month! 生日快乐！10% off every plan this month.</div>':''; }
+function bdayHtml(on){ return on?'<div class="banner">🎂 Happy birthday month! 生日快乐！10% off Standard &amp; Unlimited this month (not single classes).</div>':''; }
 
 function actionHtml(c){
   if(c.checkedIn) return '<div class="status already"><div class="word">'+VIEW.ALREADY.word+'</div><div class="zh">'+VIEW.ALREADY.zh+'</div><div class="sub">Checked in at '+esc(c.checkedIn.time)+'</div></div>';
